@@ -38,6 +38,9 @@ export class NextcloudAioStack extends cdk.Stack {
     const certificateArn = this.node.tryGetContext('certificateArn') || '';
     const hostedZoneId = this.node.tryGetContext('hostedZoneId') || '';
     const hostedZoneName = this.node.tryGetContext('hostedZoneName') || '';
+    const hostedZone = hostedZoneId && hostedZoneName
+      ? route53.HostedZone.fromHostedZoneAttributes(this, 'Zone', { hostedZoneId, zoneName: hostedZoneName })
+      : undefined;
     const aioImageTag = this.node.tryGetContext('aioImageTag') || '20260218_123804';
     const nextcloudImageUri = this.node.tryGetContext('nextcloudImageUri') || `ghcr.io/nextcloud-releases/aio-nextcloud:${aioImageTag}`;
     const apachePort = this.node.tryGetContext('apachePort') || 11000;
@@ -672,8 +675,16 @@ def handler(event, context):
       const udpTarget = nlb.addListener('TurnUdp', { port: 3478, protocol: elbv2.Protocol.UDP })
         .addTargets('TurnUdpTarget', { port: 3478, protocol: elbv2.Protocol.UDP, healthCheck: { protocol: elbv2.Protocol.TCP, port: '8081' } });
 
-      talkNlbDns = nlb.loadBalancerDnsName;
+      talkNlbDns = hostedZone ? `turn.${domain}` : nlb.loadBalancerDnsName;
       new cdk.CfnOutput(this, 'TalkNlbDns', { value: nlb.loadBalancerDnsName });
+
+      if (hostedZone) {
+        new route53.ARecord(this, 'TurnDnsRecord', {
+          zone: hostedZone,
+          recordName: `turn.${domain}`,
+          target: route53.RecordTarget.fromAlias(new route53targets.LoadBalancerTarget(nlb)),
+        });
+      }
 
       [talkSecret, signalingSecret, talkInternalSecret].forEach(s => s.grantRead(executionRole));
       NagSuppressions.addResourceSuppressions(talkSg, [
@@ -684,9 +695,6 @@ def handler(event, context):
     // ========================================
     // 15. ALB + DNS
     // ========================================
-    const hostedZone = hostedZoneId && hostedZoneName
-      ? route53.HostedZone.fromHostedZoneAttributes(this, 'Zone', { hostedZoneId, zoneName: hostedZoneName })
-      : undefined;
 
     // ACM certificate: use provided ARN, or auto-create if hosted zone is available
     const certificate = certificateArn
