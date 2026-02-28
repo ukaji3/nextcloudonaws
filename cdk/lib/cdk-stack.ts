@@ -278,6 +278,10 @@ export class NextcloudAioStack extends cdk.Stack {
     dbSecret.grantRead(executionRole);
     cacheSecret.grantRead(executionRole);
     if (osSecret) osSecret.grantRead(executionRole);
+    const adminSecret = new secretsmanager.Secret(this, 'AdminSecret', {
+      generateSecretString: { excludePunctuation: false, passwordLength: 24 },
+    });
+    adminSecret.grantRead(executionRole);
     if (imaginarySecret) imaginarySecret.grantRead(executionRole);
 
     // ========================================
@@ -382,6 +386,7 @@ def handler(event, context):
       secrets: {
         POSTGRES_PASSWORD: ecs.Secret.fromSecretsManager(dbSecret, 'password'),
         REDIS_HOST_PASSWORD: ecs.Secret.fromSecretsManager(cacheSecret),
+        ADMIN_PASSWORD: ecs.Secret.fromSecretsManager(adminSecret),
         ...(enableFulltextsearch && osSecret ? { FULLTEXTSEARCH_PASSWORD: ecs.Secret.fromSecretsManager(osSecret, 'password') } : {}),
         ...(enableTalk && talkSecret ? { TURN_SECRET: ecs.Secret.fromSecretsManager(talkSecret) } : {}),
         ...(enableTalk && signalingSecret ? { SIGNALING_SECRET: ecs.Secret.fromSecretsManager(signalingSecret) } : {}),
@@ -402,7 +407,6 @@ def handler(event, context):
         APACHE_PORT: String(apachePort),
         NEXTCLOUD_HOST: 'nextcloud-aio-nextcloud.nextcloud.local',
         ADMIN_USER: 'admin',
-        ADMIN_PASSWORD: 'changeme-on-first-login',
         OBJECTSTORE_S3_BUCKET: bucket.bucketName,
         OBJECTSTORE_S3_REGION: this.region,
         OBJECTSTORE_S3_SSL: 'true',
@@ -1288,7 +1292,7 @@ def handler(event, context):
     NagSuppressions.addResourceSuppressions(auditFn, [
       { id: 'AwsSolutions-IAM4', appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'], reason: 'Standard Lambda execution role managed policy' },
     ], true);
-    NagSuppressions.addResourceSuppressions([dbSecret, cacheSecret], [
+    NagSuppressions.addResourceSuppressions([dbSecret, cacheSecret, adminSecret], [
       { id: 'AwsSolutions-SMG4', reason: 'Secrets rotation requires application-level coordination; managed externally' },
     ]);
     const taskDefinitions = [nextcloudTd, apacheTd, notifyTd];
