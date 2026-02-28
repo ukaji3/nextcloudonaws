@@ -1042,11 +1042,21 @@ CDK スタックに以下の監視設定が含まれている。
 
 | ソース | 出力先 | 保持期間 |
 |---|---|---|
-| ECS 全コンテナ (Nextcloud, Apache, Notify-push, OnlyOffice, SigV4 Proxy) | CloudWatch Logs | 30日 |
-| VPC Flow Log | CloudWatch Logs | 2年 |
+| ECS 全コンテナ (Nextcloud, Apache, Notify-push, OnlyOffice) | CloudWatch Logs (`EcsLogs`) | 30日 |
+| 監査ログ (admin_audit: ファイルアクセス、ログイン等) | CloudWatch Logs (`AuditLogs`) | 365日 |
+| VPC Flow Log | CloudWatch Logs (`VpcFlowLogGroup`) | 30日 |
 | ALB アクセスログ | S3 (`AccessLogBucket/alb/`) | 無期限 |
 | S3 DataBucket アクセスログ | S3 (`AccessLogBucket/data-bucket/`) | 無期限 |
 | Step Functions 実行ログ | CloudWatch Logs (ALL レベル) | 30日 |
+
+監査ログは ECS ログから `admin_audit` を含むエントリを Subscription Filter + Lambda で `AuditLogs` ロググループに転送している。CloudWatch Logs Insights で検索可能:
+
+```
+fields @timestamp, @message
+| filter @message like /admin_audit/
+| sort @timestamp desc
+| limit 50
+```
 
 ### 14.2 ログメトリクスフィルター
 
