@@ -78,7 +78,15 @@ Apache コンテナの環境変数でこれらの DNS 名を指定する。
 
 Nextcloud のファイルデータを S3 に格納する。コンテナの `s3.config.php` が既に対応済み。
 
-### 2.1 Nextcloud タスク定義への環境変数
+### 2.1 ストレージクラス
+
+S3 Intelligent-Tiering を使用し、アクセスパターンに応じて自動的にコスト最適化する。
+
+- ライフサイクルルールにより、新規・既存オブジェクトを即時 Intelligent-Tiering に遷移
+- 自動ティア（Frequent / Infrequent / Archive Instant Access）のみ使用。Archive Access / Deep Archive Access は無効（Nextcloud が `RestoreObject` を呼ばないため）
+- 非現行バージョンも同様に Intelligent-Tiering に遷移
+
+### 2.2 Nextcloud タスク定義への環境変数
 
 ```json
 {
@@ -100,7 +108,7 @@ Nextcloud のファイルデータを S3 に格納する。コンテナの `s3.c
 
 IRSA 相当の仕組みとして、ECS タスクロールに S3 権限を付与する。`OBJECTSTORE_S3_KEY` / `OBJECTSTORE_S3_SECRET` は空にする。
 
-### 2.2 ECS タスクロール IAM ポリシー
+### 2.3 ECS タスクロール IAM ポリシー
 
 ```json
 {
@@ -581,7 +589,33 @@ SSL ポリシー:       ELBSecurityPolicy-TLS13-1-2-2021-06
 スティッキーセッション: 有効 (3600秒)
 ```
 
-### 7.2 Talk 用 NLB (オプション)
+### 7.2 独自ドメイン + TLS 設定
+
+`cdk.json` の context パラメータで設定する。Route 53 ホストゾーンを指定すると、ACM 証明書の発行・DNS 検証・Alias レコード作成が全て自動化される。
+
+| 設定パターン | 動作 |
+|---|---|
+| `hostedZoneId` + `hostedZoneName` を指定 | ACM 証明書を自動発行 + DNS 検証 + Alias レコード作成 |
+| `certificateArn` を指定 | 既存証明書を使用 + Alias レコード作成（ゾーン指定時） |
+| どちらも未指定 | HTTP:80 で起動（TLS なし） |
+
+```json
+{
+  "context": {
+    "domain": "cloud.example.com",
+    "hostedZoneId": "Z1234567890ABC",
+    "hostedZoneName": "example.com"
+  }
+}
+```
+
+ホストゾーン ID の確認:
+
+```bash
+aws route53 list-hosted-zones --query 'HostedZones[?Name==`example.com.`].Id' --output text
+```
+
+### 7.3 Talk 用 NLB (オプション)
 
 Talk の TURN サーバーは UDP を使用するため、NLB が必要:
 
@@ -638,154 +672,65 @@ Kubernetes の HPA に相当する機能。
 
 ---
 
-## 9. 全文検索: Amazon OpenSearch Serverless
+## 9. 全文検索: Amazon OpenSearch Service
 
 ### 9.1 課題と解決策
 
-Nextcloud の `fulltextsearch_elasticsearch` アプリは Basic 認証（`https://user:password@host:port`）で接続する。一方、OpenSearch Serverless は AWS SigV4 認証のみをサポートし、Basic 認証に対応していない。
-
-これを解決するため、AWS 公式の SigV4 署名プロキシ（[aws-sigv4-proxy](https://github.com/awslabs/aws-sigv4-proxy)）を Nextcloud タスクのサイドカーコンテナとして配置する。
+Nextcloud の `fulltextsearch_elasticsearch` アプリは Basic 認証（`https://user:password@host:port`）で接続する。OpenSearch Service の Fine-Grained Access Control（FGAC）を使用することで、Basic 認証で直接接続できる。
 
 ```
-Nextcloud (Basic Auth)
+Nextcloud (Basic Auth over HTTPS)
     │
-    ▼ localhost:9200
-SigV4 Proxy (サイドカー)
-    │
-    ▼ SigV4 署名付きリクエスト
-OpenSearch Serverless (HTTPS:443)
+    ▼ OpenSearch ドメインエンドポイント:443
+OpenSearch Service (t3.small.search)
 ```
 
-### 9.2 OpenSearch Serverless の構成
+### 9.2 OpenSearch Service の構成
 
 ```
-コレクションタイプ:  検索
-エンジンバージョン:  OpenSearch 2.x
-暗号化:            AWS 所有キー
-ネットワーク:       VPC エンドポイント
+エンジン:              OpenSearch 2.17
+インスタンスタイプ:      t3.small.search (2 vCPU, 2GB RAM)
+データノード数:          1
+EBS:                   gp3 20GB
+暗号化:                ノード間暗号化 + 保存時暗号化
+HTTPS:                 強制
+認証:                  Fine-Grained Access Control (master user)
+ネットワーク:           VPC (Isolated サブネット)
 ```
 
-データアクセスポリシー:
+マスターユーザーのパスワードは Secrets Manager で管理される。
+
+### 9.3 Nextcloud タスク定義の環境変数
+
+SigV4 プロキシは不要。Nextcloud から OpenSearch Service に HTTPS + Basic 認証で直接接続する。
 
 ```json
-[
-  {
-    "Rules": [
-      {
-        "Resource": ["index/nextcloud-collection/*"],
-        "Permission": [
-          "aoss:CreateIndex",
-          "aoss:UpdateIndex",
-          "aoss:DescribeIndex",
-          "aoss:ReadDocument",
-          "aoss:WriteDocument"
-        ],
-        "ResourceType": "index"
-      },
-      {
-        "Resource": ["collection/nextcloud-collection"],
-        "Permission": [
-          "aoss:CreateCollectionItems",
-          "aoss:DescribeCollectionItems",
-          "aoss:UpdateCollectionItems"
-        ],
-        "ResourceType": "collection"
-      }
-    ],
-    "Principal": ["arn:aws:iam::<ACCOUNT_ID>:role/<ECS_TASK_ROLE>"]
-  }
-]
+{ "name": "FULLTEXTSEARCH_ENABLED",  "value": "yes" },
+{ "name": "FULLTEXTSEARCH_HOST",     "value": "<OpenSearch ドメインエンドポイント>" },
+{ "name": "FULLTEXTSEARCH_PORT",     "value": "443" },
+{ "name": "FULLTEXTSEARCH_PROTOCOL", "value": "https" },
+{ "name": "FULLTEXTSEARCH_USER",     "value": "admin" },
+{ "name": "FULLTEXTSEARCH_PASSWORD", "value": "<Secrets Manager から注入>" },
+{ "name": "FULLTEXTSEARCH_INDEX",    "value": "nextcloud-aio" }
 ```
 
-### 9.3 Nextcloud タスク定義の変更
+`FULLTEXTSEARCH_PASSWORD` は ECS Secret として Secrets Manager から注入される。
 
-Nextcloud タスクに SigV4 プロキシをサイドカーとして追加する:
+### 9.4 セキュリティグループ
 
-```json
-{
-  "family": "nextcloud-aio-nextcloud",
-  "containerDefinitions": [
-    {
-      "name": "nextcloud",
-      "image": "ghcr.io/nextcloud-releases/aio-nextcloud:20260218_123804",
-      "essential": true,
-      "environment": [
-        { "name": "FULLTEXTSEARCH_ENABLED",  "value": "yes" },
-        { "name": "FULLTEXTSEARCH_HOST",     "value": "localhost" },
-        { "name": "FULLTEXTSEARCH_PORT",     "value": "9200" },
-        { "name": "FULLTEXTSEARCH_PROTOCOL", "value": "http" },
-        { "name": "FULLTEXTSEARCH_USER",     "value": "none" },
-        { "name": "FULLTEXTSEARCH_PASSWORD", "value": "none" },
-        { "name": "FULLTEXTSEARCH_INDEX",    "value": "nextcloud-aio" }
-      ],
-      "dependsOn": [
-        { "containerName": "sigv4-proxy", "condition": "HEALTHY" }
-      ]
-    },
-    {
-      "name": "sigv4-proxy",
-      "image": "public.ecr.aws/aws-observability/aws-sigv4-proxy:latest",
-      "essential": true,
-      "command": [
-        "--name", "aoss",
-        "--region", "ap-northeast-1",
-        "--host", "<COLLECTION_ID>.ap-northeast-1.aoss.amazonaws.com",
-        "--port", ":9200",
-        "--log-signing-process"
-      ],
-      "portMappings": [
-        { "containerPort": 9200, "protocol": "tcp" }
-      ],
-      "healthCheck": {
-        "command": ["CMD-SHELL", "curl -f http://localhost:9200/ || exit 1"],
-        "interval": 15,
-        "timeout": 5,
-        "retries": 3,
-        "startPeriod": 30
-      },
-      "cpu": 128,
-      "memory": 256,
-      "logConfiguration": {
-        "logDriver": "awslogs",
-        "options": {
-          "awslogs-group": "/ecs/nextcloud-sigv4-proxy",
-          "awslogs-region": "ap-northeast-1",
-          "awslogs-stream-prefix": "ecs"
-        }
-      }
-    }
-  ]
-}
-```
+| リソース | インバウンド | ソース |
+|---|---|---|
+| OpenSearch Service | 443/tcp | ECS タスク SG |
 
-SigV4 プロキシは ECS タスクロールの IAM 認証情報を自動的に使用するため、アクセスキーの設定は不要。
+### 9.5 スケーリング
 
-### 9.4 ECS タスクロールへの追加 IAM ポリシー
+負荷増加時は CDK のパラメータを変更して `cdk deploy` で対応する。
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": "aoss:APIAccessAll",
-      "Resource": "arn:aws:aoss:ap-northeast-1:<ACCOUNT_ID>:collection/<COLLECTION_ID>"
-    }
-  ]
-}
-```
-
-### 9.5 VPC エンドポイント
-
-OpenSearch Serverless への接続に VPC エンドポイントを作成する:
-
-```bash
-aws opensearchserverless create-vpc-endpoint \
-  --name nextcloud-aoss-vpce \
-  --vpc-id <vpc-id> \
-  --subnet-ids <subnet-id-1> <subnet-id-2> \
-  --security-group-ids <sg-id>
-```
+| 方法 | 操作 | ダウンタイム |
+|---|---|---|
+| スケールアップ | インスタンスタイプ変更 (t3.small → t3.medium → r6g.large) | なし (Blue/Green) |
+| スケールアウト | データノード数を増加 (1 → 2 → 3) | なし |
+| ストレージ拡張 | EBS サイズ変更 (20GB → 100GB) | なし |
 
 ---
 
@@ -889,6 +834,8 @@ npm install
   "context": {
     "domain": "cloud.example.com",
     "certificateArn": "arn:aws:acm:ap-northeast-1:123456789012:certificate/xxxxx",
+    "hostedZoneId": "Z1234567890ABC",
+    "hostedZoneName": "example.com",
     "aioImageTag": "20260218_123804",
     "nextcloudImageUri": "<ACCOUNT_ID>.dkr.ecr.ap-northeast-1.amazonaws.com/aio-nextcloud:custom",
     "apachePort": 11000,
@@ -906,10 +853,12 @@ npm install
 | パラメータ | 説明 |
 |---|---|
 | `domain` | Nextcloud のドメイン名 |
-| `certificateArn` | ACM 証明書の ARN（空の場合 HTTP:80 で起動） |
+| `certificateArn` | ACM 証明書の ARN（空の場合、`hostedZoneId` 指定時は自動発行） |
+| `hostedZoneId` | Route 53 ホストゾーン ID（指定時は DNS レコード自動作成） |
+| `hostedZoneName` | Route 53 ホストゾーン名（例: `example.com`） |
 | `nextcloudImageUri` | カスタムビルドした Nextcloud イメージの URI（空の場合は公式イメージ） |
 | `enableOnlyOffice` | OnlyOffice の有効化 |
-| `enableFulltextsearch` | OpenSearch Serverless + SigV4 プロキシの有効化 |
+| `enableFulltextsearch` | OpenSearch Service + 全文検索の有効化 |
 | `auroraMinAcu` / `auroraMaxAcu` | Aurora Serverless v2 の ACU 範囲 |
 
 ### 12.3 デプロイ
@@ -925,12 +874,14 @@ npx cdk deploy
 - EFS + アクセスポイント
 - Aurora Serverless v2 (PostgreSQL)
 - ElastiCache Serverless (Valkey)
-- S3 バケット
-- OpenSearch Serverless コレクション（enableFulltextsearch 時）
+- S3 バケット（Intelligent-Tiering + アクセスログバケット）
+- OpenSearch Service ドメイン（enableFulltextsearch 時）
 - ECS Fargate クラスター + Cloud Map 名前空間
 - ECS Service: Nextcloud, Apache, Notify-push, OnlyOffice（オプション）
 - ALB + HTTPS リスナー
 - Auto Scaling (Nextcloud: 2-10, Apache: 2-5)
+- ACM 証明書 + Route 53 Alias レコード（hostedZoneId 指定時）
+- CloudWatch Alarms / Dashboard / ログメトリクスフィルター
 - Step Functions ステートマシン（バージョンアップ自動化）
 - CodePipeline + CodeBuild（CI/CD パイプライン）
 - ECR リポジトリ（Nextcloud カスタムイメージ）
