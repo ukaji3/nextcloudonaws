@@ -12,6 +12,8 @@ import * as servicediscovery from 'aws-cdk-lib/aws-servicediscovery';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
+import * as route53 from 'aws-cdk-lib/aws-route53';
+import * as route53targets from 'aws-cdk-lib/aws-route53-targets';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as appscaling from 'aws-cdk-lib/aws-applicationautoscaling';
 
@@ -32,6 +34,8 @@ export class NextcloudAioStack extends cdk.Stack {
     // --- Context Parameters ---
     const domain = this.node.tryGetContext('domain') || 'cloud.example.com';
     const certificateArn = this.node.tryGetContext('certificateArn') || '';
+    const hostedZoneId = this.node.tryGetContext('hostedZoneId') || '';
+    const hostedZoneName = this.node.tryGetContext('hostedZoneName') || '';
     const aioImageTag = this.node.tryGetContext('aioImageTag') || '20260218_123804';
     const nextcloudImageUri = this.node.tryGetContext('nextcloudImageUri') || `ghcr.io/nextcloud-releases/aio-nextcloud:${aioImageTag}`;
     const apachePort = this.node.tryGetContext('apachePort') || 11000;
@@ -519,8 +523,19 @@ export class NextcloudAioStack extends cdk.Stack {
     }
 
     // ========================================
-    // 15. ALB
+    // 15. ALB + DNS
     // ========================================
+    const hostedZone = hostedZoneId && hostedZoneName
+      ? route53.HostedZone.fromHostedZoneAttributes(this, 'Zone', { hostedZoneId, zoneName: hostedZoneName })
+      : undefined;
+
+    // ACM certificate: use provided ARN, or auto-create if hosted zone is available
+    const certificate = certificateArn
+      ? acm.Certificate.fromCertificateArn(this, 'Cert', certificateArn)
+      : hostedZone
+        ? new acm.Certificate(this, 'Cert', { domainName: domain, validation: acm.CertificateValidation.fromDns(hostedZone) })
+        : undefined;
+
     const alb = new elbv2.ApplicationLoadBalancer(this, 'Alb', {
       vpc,
       internetFacing: true,
@@ -528,8 +543,8 @@ export class NextcloudAioStack extends cdk.Stack {
     });
     alb.logAccessLogs(accessLogBucket, 'alb/');
 
-    const listenerProps: elbv2.BaseApplicationListenerProps = certificateArn
-      ? { port: 443, protocol: elbv2.ApplicationProtocol.HTTPS, certificates: [elbv2.ListenerCertificate.fromArn(certificateArn)], sslPolicy: elbv2.SslPolicy.RECOMMENDED_TLS }
+    const listenerProps: elbv2.BaseApplicationListenerProps = certificate
+      ? { port: 443, protocol: elbv2.ApplicationProtocol.HTTPS, certificates: [certificate], sslPolicy: elbv2.SslPolicy.RECOMMENDED_TLS }
       : { port: 80, protocol: elbv2.ApplicationProtocol.HTTP };
     const listener = alb.addListener('Listener', listenerProps);
 
@@ -1074,6 +1089,15 @@ export class NextcloudAioStack extends cdk.Stack {
     // Outputs
     // ========================================
     new cdk.CfnOutput(this, 'AlbDns', { value: alb.loadBalancerDnsName });
+
+    // Route 53 Alias record
+    if (hostedZone) {
+      new route53.ARecord(this, 'DnsRecord', {
+        zone: hostedZone,
+        recordName: domain,
+        target: route53.RecordTarget.fromAlias(new route53targets.LoadBalancerTarget(alb)),
+      });
+    }
     new cdk.CfnOutput(this, 'S3Bucket', { value: bucket.bucketName });
     new cdk.CfnOutput(this, 'AuroraEndpoint', { value: dbCluster.clusterEndpoint.hostname });
     new cdk.CfnOutput(this, 'CacheEndpoint', { value: cache.attrEndpointAddress });
