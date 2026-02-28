@@ -6,7 +6,7 @@ import * as efs from 'aws-cdk-lib/aws-efs';
 import * as rds from 'aws-cdk-lib/aws-rds';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as elasticache from 'aws-cdk-lib/aws-elasticache';
-import * as opensearchserverless from 'aws-cdk-lib/aws-opensearchserverless';
+import * as opensearch from 'aws-cdk-lib/aws-opensearchservice';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as servicediscovery from 'aws-cdk-lib/aws-servicediscovery';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -184,41 +184,45 @@ export class NextcloudAioStack extends cdk.Stack {
     });
 
     // ========================================
-    // 7. OpenSearch Serverless (optional)
+    // 7. OpenSearch Service (optional)
     // ========================================
-    let aossCollectionEndpoint = '';
-    let aossCollection: opensearchserverless.CfnCollection | undefined;
+    let osDomain: opensearch.Domain | undefined;
+    const osSecret = enableFulltextsearch ? new secretsmanager.Secret(this, 'OsSecret', {
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({ username: 'admin' }),
+        generateStringKey: 'password',
+        excludePunctuation: false,
+        includeSpace: false,
+        passwordLength: 16,
+        requireEachIncludedType: true,
+      },
+    }) : undefined;
 
     if (enableFulltextsearch) {
-      const encPolicy = new opensearchserverless.CfnSecurityPolicy(this, 'AossEncPolicy', {
-        name: 'nextcloud-enc',
-        type: 'encryption',
-        policy: JSON.stringify({
-          Rules: [{ ResourceType: 'collection', Resource: ['collection/nextcloud-fts'] }],
-          AWSOwnedKey: true,
-        }),
-      });
+      const osSg = new ec2.SecurityGroup(this, 'OsSg', { vpc, description: 'OpenSearch' });
+      osSg.addIngressRule(ecsSg, ec2.Port.tcp(443));
 
-      const netPolicy = new opensearchserverless.CfnSecurityPolicy(this, 'AossNetPolicy', {
-        name: 'nextcloud-net',
-        type: 'network',
-        policy: JSON.stringify([{
-          Rules: [
-            { ResourceType: 'collection', Resource: ['collection/nextcloud-fts'] },
-            { ResourceType: 'dashboard', Resource: ['collection/nextcloud-fts'] },
-          ],
-          AllowFromPublic: false,
-          SourceVPCEs: [], // VPC endpoint ID will be added after creation
-        }]),
+      osDomain = new opensearch.Domain(this, 'OsDomain', {
+        version: opensearch.EngineVersion.OPENSEARCH_2_17,
+        vpc,
+        vpcSubnets: [{ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }],
+        securityGroups: [osSg],
+        zoneAwareness: { enabled: false },
+        capacity: {
+          dataNodeInstanceType: 't3.small.search',
+          dataNodes: 1,
+          multiAzWithStandbyEnabled: false,
+        },
+        ebs: { volumeSize: 20, volumeType: ec2.EbsDeviceVolumeType.GP3 },
+        nodeToNodeEncryption: true,
+        encryptionAtRest: { enabled: true },
+        enforceHttps: true,
+        fineGrainedAccessControl: {
+          masterUserName: 'admin',
+          masterUserPassword: osSecret!.secretValueFromJson('password'),
+        },
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
       });
-
-      aossCollection = new opensearchserverless.CfnCollection(this, 'AossCollection', {
-        name: 'nextcloud-fts',
-        type: 'SEARCH',
-      });
-      aossCollection.addDependency(encPolicy);
-      aossCollection.addDependency(netPolicy);
-      aossCollectionEndpoint = aossCollection.attrCollectionEndpoint;
     }
 
     // ========================================
@@ -239,32 +243,13 @@ export class NextcloudAioStack extends cdk.Stack {
     });
     bucket.grantReadWrite(taskRole);
 
-    if (enableFulltextsearch && aossCollection) {
-      taskRole.addToPolicy(new iam.PolicyStatement({
-        actions: ['aoss:APIAccessAll'],
-        resources: [aossCollection.attrArn],
-      }));
-
-      // Data access policy for OpenSearch Serverless
-      new opensearchserverless.CfnAccessPolicy(this, 'AossDataPolicy', {
-        name: 'nextcloud-data',
-        type: 'data',
-        policy: JSON.stringify([{
-          Rules: [
-            { Resource: ['index/nextcloud-fts/*'], Permission: ['aoss:CreateIndex', 'aoss:UpdateIndex', 'aoss:DescribeIndex', 'aoss:ReadDocument', 'aoss:WriteDocument'], ResourceType: 'index' },
-            { Resource: ['collection/nextcloud-fts'], Permission: ['aoss:CreateCollectionItems', 'aoss:DescribeCollectionItems', 'aoss:UpdateCollectionItems'], ResourceType: 'collection' },
-          ],
-          Principal: [taskRole.roleArn],
-        }]),
-      });
-    }
-
     const executionRole = new iam.Role(this, 'ExecRole', {
       assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
       managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonECSTaskExecutionRolePolicy')],
     });
     dbSecret.grantRead(executionRole);
     cacheSecret.grantRead(executionRole);
+    if (osSecret) osSecret.grantRead(executionRole);
 
     // ========================================
     // 10. Log Groups
@@ -336,6 +321,7 @@ export class NextcloudAioStack extends cdk.Stack {
       secrets: {
         POSTGRES_PASSWORD: ecs.Secret.fromSecretsManager(dbSecret, 'password'),
         REDIS_HOST_PASSWORD: ecs.Secret.fromSecretsManager(cacheSecret),
+        ...(enableFulltextsearch && osSecret ? { FULLTEXTSEARCH_PASSWORD: ecs.Secret.fromSecretsManager(osSecret, 'password') } : {}),
       },
       environment: {
         POSTGRES_HOST: dbCluster.clusterEndpoint.hostname,
@@ -370,10 +356,10 @@ export class NextcloudAioStack extends cdk.Stack {
         CLAMAV_ENABLED: enableClamav ? 'yes' : 'no',
         IMAGINARY_ENABLED: enableImaginary ? 'yes' : 'no',
         FULLTEXTSEARCH_ENABLED: enableFulltextsearch ? 'yes' : 'no',
-        FULLTEXTSEARCH_HOST: enableFulltextsearch ? 'localhost' : '',
-        FULLTEXTSEARCH_PORT: enableFulltextsearch ? '9200' : '',
-        FULLTEXTSEARCH_PROTOCOL: 'http',
-        FULLTEXTSEARCH_USER: 'none',
+        FULLTEXTSEARCH_HOST: enableFulltextsearch && osDomain ? osDomain.domainEndpoint : '',
+        FULLTEXTSEARCH_PORT: enableFulltextsearch ? '443' : '',
+        FULLTEXTSEARCH_PROTOCOL: 'https',
+        FULLTEXTSEARCH_USER: 'admin',
         FULLTEXTSEARCH_PASSWORD: 'none',
         FULLTEXTSEARCH_INDEX: 'nextcloud-aio',
         WHITEBOARD_ENABLED: 'no',
@@ -388,27 +374,6 @@ export class NextcloudAioStack extends cdk.Stack {
       containerPath: '/var/www/html',
       readOnly: false,
     });
-
-    // SigV4 proxy sidecar for OpenSearch Serverless
-    if (enableFulltextsearch && aossCollectionEndpoint) {
-      const sigv4 = nextcloudTd.addContainer('sigv4-proxy', {
-        image: ecs.ContainerImage.fromRegistry('public.ecr.aws/aws-observability/aws-sigv4-proxy:latest'),
-        logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'sigv4', logGroup }),
-        command: ['--name', 'aoss', '--region', this.region, '--host', cdk.Fn.select(1, cdk.Fn.split('//', aossCollectionEndpoint)), '--port', ':9200'],
-        portMappings: [{ containerPort: 9200 }],
-        healthCheck: {
-          command: ['CMD-SHELL', 'curl -sf http://localhost:9200/ || exit 1'],
-          interval: cdk.Duration.seconds(15),
-          timeout: cdk.Duration.seconds(5),
-          retries: 3,
-          startPeriod: cdk.Duration.seconds(30),
-        },
-        cpu: 128,
-        memoryLimitMiB: 256,
-        essential: true,
-      });
-      nextcloudContainer.addContainerDependencies({ container: sigv4, condition: ecs.ContainerDependencyCondition.HEALTHY });
-    }
 
     const nextcloudSvc = createService('nextcloud', nextcloudTd, 9000, { desiredCount: 2, minCapacity: 2, maxCapacity: 10 });
 
@@ -1113,8 +1078,8 @@ export class NextcloudAioStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'AuroraEndpoint', { value: dbCluster.clusterEndpoint.hostname });
     new cdk.CfnOutput(this, 'CacheEndpoint', { value: cache.attrEndpointAddress });
     new cdk.CfnOutput(this, 'EfsId', { value: fileSystem.fileSystemId });
-    if (aossCollection) {
-      new cdk.CfnOutput(this, 'AossEndpoint', { value: aossCollectionEndpoint });
+    if (osDomain) {
+      new cdk.CfnOutput(this, 'OsEndpoint', { value: osDomain.domainEndpoint });
     }
     new cdk.CfnOutput(this, 'UpgradeStateMachineArn', { value: stateMachine.stateMachineArn });
     new cdk.CfnOutput(this, 'EcrRepoUri', { value: ecrRepo.repositoryUri });
