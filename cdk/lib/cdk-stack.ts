@@ -165,6 +165,21 @@ export class NextcloudAioStack extends cdk.Stack {
       enforceSSL: true,
       serverAccessLogsBucket: accessLogBucket,
       serverAccessLogsPrefix: 'data-bucket/',
+      intelligentTieringConfigurations: [{
+        name: 'default',
+        archiveAccessTierTime: undefined,
+        deepArchiveAccessTierTime: undefined,
+      }],
+      lifecycleRules: [{
+        transitions: [{
+          storageClass: s3.StorageClass.INTELLIGENT_TIERING,
+          transitionAfter: cdk.Duration.days(0),
+        }],
+        noncurrentVersionTransitions: [{
+          storageClass: s3.StorageClass.INTELLIGENT_TIERING,
+          transitionAfter: cdk.Duration.days(0),
+        }],
+      }],
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
