@@ -62,7 +62,11 @@ export class NextcloudAioStack extends cdk.Stack {
       ],
     });
 
-    vpc.addFlowLog('FlowLog');
+    vpc.addFlowLog('FlowLog', {
+      destination: ec2.FlowLogDestination.toCloudWatchLogs(
+        new logs.LogGroup(this, 'VpcFlowLogGroup', { retention: logs.RetentionDays.ONE_MONTH }),
+      ),
+    });
 
     // ========================================
     // 2. Security Groups
