@@ -1,0 +1,6 @@
+.git
+cdk/
+docs/
+*.md
+.gitignore
+.dockerignore

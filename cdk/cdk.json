@@ -1,0 +1,24 @@
+{
+  "app": "npx ts-node --prefer-ts-exts bin/cdk.ts",
+  "watch": {
+    "include": ["**"],
+    "exclude": ["node_modules", "cdk.out", "**/*.js", "**/*.d.ts"]
+  },
+  "context": {
+    "domain": "cloud.example.com",
+    "certificateArn": "",
+    "aioImageTag": "20260218_123804",
+    "nextcloudImageUri": "",
+    "apachePort": 11000,
+    "enableOnlyOffice": "true",
+    "enableTalk": "false",
+    "enableFulltextsearch": "false",
+    "enableImaginary": "false",
+    "enableClamav": "false",
+    "auroraMinAcu": 0.5,
+    "auroraMaxAcu": 16,
+    "githubOwner": "ukaji3",
+    "githubRepo": "nextcloud-all-in-one",
+    "githubBranch": "main"
+  }
+}
