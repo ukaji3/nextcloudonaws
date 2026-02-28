@@ -25,6 +25,8 @@ import * as codepipeline from 'aws-cdk-lib/aws-codepipeline';
 import * as codepipeline_actions from 'aws-cdk-lib/aws-codepipeline-actions';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs_destinations from 'aws-cdk-lib/aws-logs-destinations';
 import { NagSuppressions } from 'cdk-nag';
 
 export class NextcloudAioStack extends cdk.Stack {
@@ -265,6 +267,38 @@ export class NextcloudAioStack extends cdk.Stack {
     const logGroup = new logs.LogGroup(this, 'EcsLogs', {
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // Audit log: separate log group with 365-day retention
+    const auditLogGroup = new logs.LogGroup(this, 'AuditLogs', {
+      retention: logs.RetentionDays.ONE_YEAR,
+    });
+
+    const auditFn = new lambda.Function(this, 'AuditLogForwarder', {
+      runtime: lambda.Runtime.PYTHON_3_14,
+      handler: 'index.handler',
+      code: lambda.Code.fromInline(`
+import base64, gzip, json, os, boto3
+client = boto3.client('logs')
+LOG_GROUP = os.environ['AUDIT_LOG_GROUP']
+def handler(event, context):
+    data = json.loads(gzip.decompress(base64.b64decode(event['awslogs']['data'])))
+    for e in data['logEvents']:
+        client.put_log_events(
+            logGroupName=LOG_GROUP,
+            logStreamName=data['logStream'],
+            logEvents=[{'timestamp': e['timestamp'], 'message': e['message']}],
+        )
+`),
+      environment: { AUDIT_LOG_GROUP: auditLogGroup.logGroupName },
+      timeout: cdk.Duration.seconds(30),
+    });
+    auditLogGroup.grantWrite(auditFn);
+
+    new logs.SubscriptionFilter(this, 'AuditFilter', {
+      logGroup,
+      destination: new logs_destinations.LambdaDestination(auditFn),
+      filterPattern: logs.FilterPattern.literal('admin_audit'),
     });
 
     // ========================================
@@ -1122,6 +1156,9 @@ export class NextcloudAioStack extends cdk.Stack {
     NagSuppressions.addResourceSuppressions(executionRole, [
       { id: 'AwsSolutions-IAM4', appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'], reason: 'Standard ECS task execution role managed policy' },
     ]);
+    NagSuppressions.addResourceSuppressions(auditFn, [
+      { id: 'AwsSolutions-IAM4', appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'], reason: 'Standard Lambda execution role managed policy' },
+    ], true);
     NagSuppressions.addResourceSuppressions([dbSecret, cacheSecret], [
       { id: 'AwsSolutions-SMG4', reason: 'Secrets rotation requires application-level coordination; managed externally' },
     ]);
