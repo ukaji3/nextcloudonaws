@@ -21,6 +21,9 @@ import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as codebuild from 'aws-cdk-lib/aws-codebuild';
 import * as codepipeline from 'aws-cdk-lib/aws-codepipeline';
 import * as codepipeline_actions from 'aws-cdk-lib/aws-codepipeline-actions';
+import * as kms from 'aws-cdk-lib/aws-kms';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import { NagSuppressions } from 'cdk-nag';
 
 export class NextcloudAioStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -54,6 +57,8 @@ export class NextcloudAioStack extends cdk.Stack {
         { name: 'Isolated', subnetType: ec2.SubnetType.PRIVATE_ISOLATED, cidrMask: 24 },
       ],
     });
+
+    vpc.addFlowLog('FlowLog');
 
     // ========================================
     // 2. Security Groups
@@ -116,11 +121,16 @@ export class NextcloudAioStack extends cdk.Stack {
       defaultDatabaseName: 'nextcloud_database',
       serverlessV2MinCapacity: auroraMinAcu,
       serverlessV2MaxCapacity: auroraMaxAcu,
-      writer: rds.ClusterInstance.serverlessV2('Writer'),
+      writer: rds.ClusterInstance.serverlessV2('Writer', {
+        enablePerformanceInsights: true,
+        performanceInsightRetention: rds.PerformanceInsightRetention.DEFAULT,
+      }),
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
       securityGroups: [dbSg],
       storageEncrypted: true,
+      iamAuthentication: true,
+      monitoringInterval: cdk.Duration.seconds(60),
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
@@ -141,10 +151,20 @@ export class NextcloudAioStack extends cdk.Stack {
     // ========================================
     // 6. S3
     // ========================================
+    const accessLogBucket = new s3.Bucket(this, 'AccessLogBucket', {
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
     const bucket = new s3.Bucket(this, 'DataBucket', {
       encryption: s3.BucketEncryption.S3_MANAGED,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       versioned: true,
+      enforceSSL: true,
+      serverAccessLogsBucket: accessLogBucket,
+      serverAccessLogsPrefix: 'data-bucket/',
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
@@ -189,7 +209,7 @@ export class NextcloudAioStack extends cdk.Stack {
     // ========================================
     // 8. ECS Cluster + Cloud Map
     // ========================================
-    const cluster = new ecs.Cluster(this, 'Cluster', { vpc });
+    const cluster = new ecs.Cluster(this, 'Cluster', { vpc, containerInsights: true });
 
     const namespace = new servicediscovery.PrivateDnsNamespace(this, 'Namespace', {
       name: 'nextcloud.local',
@@ -513,6 +533,9 @@ export class NextcloudAioStack extends cdk.Stack {
       });
       ooContainer.addMountPoints({ sourceVolume: 'onlyoffice-data', containerPath: '/var/lib/onlyoffice', readOnly: false });
       createService('onlyoffice', ooTd, 80);
+      NagSuppressions.addResourceSuppressions(ooTd, [
+        { id: 'AwsSolutions-ECS2', reason: 'Non-sensitive configuration values (feature flags) passed as environment variables' },
+      ]);
     }
 
     // ========================================
@@ -523,6 +546,7 @@ export class NextcloudAioStack extends cdk.Stack {
       internetFacing: true,
       securityGroup: albSg,
     });
+    alb.logAccessLogs(accessLogBucket, 'alb/');
 
     const listenerProps: elbv2.BaseApplicationListenerProps = certificateArn
       ? { port: 443, protocol: elbv2.ApplicationProtocol.HTTPS, certificates: [elbv2.ListenerCertificate.fromArn(certificateArn)], sslPolicy: elbv2.SslPolicy.RECOMMENDED_TLS }
@@ -713,11 +737,18 @@ export class NextcloudAioStack extends cdk.Stack {
       parameters: { 'executionId.$': "$$.Execution.Name" },
     });
 
+    const sfnLogGroup = new logs.LogGroup(this, 'SfnLogs', {
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
     const stateMachine = new sfn.StateMachine(this, 'UpgradeStateMachine', {
       definitionBody: sfn.DefinitionBody.fromChainable(extractId.next(mainChain)),
       timeout: cdk.Duration.hours(2),
       role: sfnRole,
       stateMachineName: 'nextcloud-upgrade',
+      tracingEnabled: true,
+      logs: { destination: sfnLogGroup, level: sfn.LogLevel.ALL },
     });
 
     // ========================================
@@ -778,10 +809,25 @@ export class NextcloudAioStack extends cdk.Stack {
       resources: ['*'],
     }));
 
+    const pipelineKey = new kms.Key(this, 'PipelineKey', {
+      enableKeyRotation: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    const pipelineArtifactsBucket = new s3.Bucket(this, 'PipelineArtifactsBucket', {
+      encryption: s3.BucketEncryption.KMS,
+      encryptionKey: pipelineKey,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+    });
+
     const sourceOutput = new codepipeline.Artifact();
     const pipeline = new codepipeline.Pipeline(this, 'Pipeline', {
       pipelineName: 'nextcloud-deploy',
       pipelineType: codepipeline.PipelineType.V2,
+      artifactBucket: pipelineArtifactsBucket,
       stages: [
         {
           stageName: 'Source',
@@ -811,6 +857,240 @@ export class NextcloudAioStack extends cdk.Stack {
     });
 
     // ========================================
+    // 18. Monitoring - Log Metric Filters
+    // ========================================
+    const errorMetric = new logs.MetricFilter(this, 'ErrorLogFilter', {
+      logGroup,
+      filterPattern: logs.FilterPattern.anyTerm('ERROR', 'CRITICAL', 'Fatal'),
+      metricNamespace: 'Nextcloud',
+      metricName: 'ErrorCount',
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
+    // ========================================
+    // 19. Monitoring - CloudWatch Alarms
+    // ========================================
+    // ECS: Nextcloud CPU high
+    new cloudwatch.Alarm(this, 'NextcloudCpuAlarm', {
+      metric: nextcloudSvc.metricCpuUtilization({ period: cdk.Duration.minutes(5) }),
+      threshold: 80,
+      evaluationPeriods: 3,
+      alarmDescription: 'Nextcloud ECS CPU > 80% for 15 min',
+    });
+
+    // ECS: Nextcloud Memory high
+    new cloudwatch.Alarm(this, 'NextcloudMemoryAlarm', {
+      metric: nextcloudSvc.metricMemoryUtilization({ period: cdk.Duration.minutes(5) }),
+      threshold: 85,
+      evaluationPeriods: 3,
+      alarmDescription: 'Nextcloud ECS Memory > 85% for 15 min',
+    });
+
+    // ECS: Apache CPU high
+    new cloudwatch.Alarm(this, 'ApacheCpuAlarm', {
+      metric: apacheSvc.metricCpuUtilization({ period: cdk.Duration.minutes(5) }),
+      threshold: 80,
+      evaluationPeriods: 3,
+      alarmDescription: 'Apache ECS CPU > 80% for 15 min',
+    });
+
+    // ALB: 5xx errors
+    const alb5xx = new cloudwatch.Alarm(this, 'Alb5xxAlarm', {
+      metric: alb.metrics.httpCodeElb(elbv2.HttpCodeElb.ELB_5XX_COUNT, { period: cdk.Duration.minutes(5) }),
+      threshold: 10,
+      evaluationPeriods: 2,
+      alarmDescription: 'ALB 5xx errors > 10 for 10 min',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // ALB: Target 5xx errors
+    new cloudwatch.Alarm(this, 'Target5xxAlarm', {
+      metric: alb.metrics.httpCodeTarget(elbv2.HttpCodeTarget.TARGET_5XX_COUNT, { period: cdk.Duration.minutes(5) }),
+      threshold: 10,
+      evaluationPeriods: 2,
+      alarmDescription: 'Target 5xx errors > 10 for 10 min',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // ALB: Target response time
+    new cloudwatch.Alarm(this, 'ResponseTimeAlarm', {
+      metric: alb.metrics.targetResponseTime({ period: cdk.Duration.minutes(5), statistic: 'p95' }),
+      threshold: 5,
+      evaluationPeriods: 3,
+      alarmDescription: 'ALB p95 response time > 5s for 15 min',
+    });
+
+    // ALB: Unhealthy targets
+    new cloudwatch.Alarm(this, 'UnhealthyTargetsAlarm', {
+      metric: new cloudwatch.Metric({
+        namespace: 'AWS/ApplicationELB',
+        metricName: 'UnHealthyHostCount',
+        dimensionsMap: { LoadBalancer: alb.loadBalancerFullName },
+        period: cdk.Duration.minutes(1),
+        statistic: 'Maximum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 3,
+      alarmDescription: 'Unhealthy targets detected for 3 min',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // Aurora: CPU
+    new cloudwatch.Alarm(this, 'AuroraCpuAlarm', {
+      metric: new cloudwatch.Metric({
+        namespace: 'AWS/RDS',
+        metricName: 'CPUUtilization',
+        dimensionsMap: { DBClusterIdentifier: dbCluster.clusterIdentifier },
+        period: cdk.Duration.minutes(5),
+        statistic: 'Average',
+      }),
+      threshold: 80,
+      evaluationPeriods: 3,
+      alarmDescription: 'Aurora CPU > 80% for 15 min',
+    });
+
+    // Aurora: Serverless capacity
+    new cloudwatch.Alarm(this, 'AuroraCapacityAlarm', {
+      metric: new cloudwatch.Metric({
+        namespace: 'AWS/RDS',
+        metricName: 'ServerlessDatabaseCapacity',
+        dimensionsMap: { DBClusterIdentifier: dbCluster.clusterIdentifier },
+        period: cdk.Duration.minutes(5),
+        statistic: 'Average',
+      }),
+      threshold: auroraMaxAcu * 0.8,
+      evaluationPeriods: 3,
+      alarmDescription: `Aurora capacity > ${auroraMaxAcu * 0.8} ACU for 15 min`,
+    });
+
+    // Aurora: Freeable memory low
+    new cloudwatch.Alarm(this, 'AuroraMemoryAlarm', {
+      metric: new cloudwatch.Metric({
+        namespace: 'AWS/RDS',
+        metricName: 'FreeableMemory',
+        dimensionsMap: { DBClusterIdentifier: dbCluster.clusterIdentifier },
+        period: cdk.Duration.minutes(5),
+        statistic: 'Average',
+      }),
+      threshold: 256 * 1024 * 1024, // 256MB
+      evaluationPeriods: 3,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      alarmDescription: 'Aurora freeable memory < 256MB for 15 min',
+    });
+
+    // Log errors
+    new cloudwatch.Alarm(this, 'ErrorLogAlarm', {
+      metric: errorMetric.metric({ period: cdk.Duration.minutes(5), statistic: 'Sum' }),
+      threshold: 50,
+      evaluationPeriods: 2,
+      alarmDescription: 'Error log count > 50 in 10 min',
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // ========================================
+    // 20. CloudWatch Dashboard
+    // ========================================
+    const dashboard = new cloudwatch.Dashboard(this, 'Dashboard', {
+      dashboardName: 'Nextcloud-Monitoring',
+    });
+
+    // Row 1: ECS overview
+    dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'ECS CPU Utilization',
+        left: [
+          nextcloudSvc.metricCpuUtilization({ label: 'Nextcloud' }),
+          apacheSvc.metricCpuUtilization({ label: 'Apache' }),
+          notifySvc.metricCpuUtilization({ label: 'Notify-push' }),
+        ],
+        width: 12,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'ECS Memory Utilization',
+        left: [
+          nextcloudSvc.metricMemoryUtilization({ label: 'Nextcloud' }),
+          apacheSvc.metricMemoryUtilization({ label: 'Apache' }),
+          notifySvc.metricMemoryUtilization({ label: 'Notify-push' }),
+        ],
+        width: 12,
+      }),
+    );
+
+    // Row 2: ALB
+    dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'ALB Request Count & Errors',
+        left: [alb.metrics.requestCount({ label: 'Requests' })],
+        right: [
+          alb.metrics.httpCodeElb(elbv2.HttpCodeElb.ELB_5XX_COUNT, { label: '5xx', color: '#d62728' }),
+          alb.metrics.httpCodeTarget(elbv2.HttpCodeTarget.TARGET_5XX_COUNT, { label: 'Target 5xx', color: '#ff7f0e' }),
+        ],
+        width: 12,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'ALB Response Time (p50/p95/p99)',
+        left: [
+          alb.metrics.targetResponseTime({ label: 'p50', statistic: 'p50' }),
+          alb.metrics.targetResponseTime({ label: 'p95', statistic: 'p95' }),
+          alb.metrics.targetResponseTime({ label: 'p99', statistic: 'p99' }),
+        ],
+        width: 12,
+      }),
+    );
+
+    // Row 3: Aurora
+    dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'Aurora CPU & Capacity',
+        left: [new cloudwatch.Metric({
+          namespace: 'AWS/RDS', metricName: 'CPUUtilization',
+          dimensionsMap: { DBClusterIdentifier: dbCluster.clusterIdentifier }, label: 'CPU %',
+        })],
+        right: [new cloudwatch.Metric({
+          namespace: 'AWS/RDS', metricName: 'ServerlessDatabaseCapacity',
+          dimensionsMap: { DBClusterIdentifier: dbCluster.clusterIdentifier }, label: 'ACU',
+        })],
+        width: 12,
+      }),
+      new cloudwatch.GraphWidget({
+        title: 'Aurora Connections & Latency',
+        left: [new cloudwatch.Metric({
+          namespace: 'AWS/RDS', metricName: 'DatabaseConnections',
+          dimensionsMap: { DBClusterIdentifier: dbCluster.clusterIdentifier }, label: 'Connections',
+        })],
+        right: [
+          new cloudwatch.Metric({
+            namespace: 'AWS/RDS', metricName: 'ReadLatency',
+            dimensionsMap: { DBClusterIdentifier: dbCluster.clusterIdentifier }, label: 'Read',
+          }),
+          new cloudwatch.Metric({
+            namespace: 'AWS/RDS', metricName: 'WriteLatency',
+            dimensionsMap: { DBClusterIdentifier: dbCluster.clusterIdentifier }, label: 'Write',
+          }),
+        ],
+        width: 12,
+      }),
+    );
+
+    // Row 4: Errors & ECS Task Count
+    dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'Application Error Logs',
+        left: [errorMetric.metric({ label: 'Errors', statistic: 'Sum' })],
+        width: 12,
+      }),
+      new cloudwatch.SingleValueWidget({
+        title: 'Running Tasks',
+        metrics: [
+          nextcloudSvc.metricCpuUtilization({ label: 'Nextcloud CPU' }),
+          apacheSvc.metricCpuUtilization({ label: 'Apache CPU' }),
+        ],
+        width: 12,
+      }),
+    );
+
+    // ========================================
     // Outputs
     // ========================================
     new cdk.CfnOutput(this, 'AlbDns', { value: alb.loadBalancerDnsName });
@@ -824,5 +1104,41 @@ export class NextcloudAioStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'UpgradeStateMachineArn', { value: stateMachine.stateMachineArn });
     new cdk.CfnOutput(this, 'EcrRepoUri', { value: ecrRepo.repositoryUri });
     new cdk.CfnOutput(this, 'PipelineName', { value: pipeline.pipelineName });
+
+    // ========================================
+    // Nag Suppressions (intentional design decisions)
+    // ========================================
+    NagSuppressions.addResourceSuppressions(albSg, [
+      { id: 'AwsSolutions-EC23', reason: 'ALB is public-facing for Nextcloud web access' },
+    ]);
+    NagSuppressions.addResourceSuppressions(executionRole, [
+      { id: 'AwsSolutions-IAM4', appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'], reason: 'Standard ECS task execution role managed policy' },
+    ]);
+    NagSuppressions.addResourceSuppressions([dbSecret, cacheSecret], [
+      { id: 'AwsSolutions-SMG4', reason: 'Secrets rotation requires application-level coordination; managed externally' },
+    ]);
+    const taskDefinitions = [nextcloudTd, apacheTd, notifyTd];
+    NagSuppressions.addResourceSuppressions(taskDefinitions, [
+      { id: 'AwsSolutions-ECS2', reason: 'Non-sensitive configuration values (hostnames, ports, feature flags) passed as environment variables' },
+    ]);
+    NagSuppressions.addResourceSuppressions(accessLogBucket, [
+      { id: 'AwsSolutions-S1', reason: 'This is the access log destination bucket itself' },
+    ]);
+    // IAM5: wildcard permissions auto-generated by CDK grant methods
+    NagSuppressions.addResourceSuppressions(
+      [taskRole, sfnRole, buildProject.role!, pipeline.role],
+      [{ id: 'AwsSolutions-IAM5', reason: 'Wildcard permissions generated by CDK grant helpers for S3, CodeBuild, KMS, and ECS operations' }],
+      true,
+    );
+    // ArtifactsBucket S1: Pipeline-managed internal bucket
+    NagSuppressions.addResourceSuppressions(pipeline, [
+      { id: 'AwsSolutions-S1', reason: 'Pipeline artifacts bucket is internal; access logged via CloudTrail' },
+    ], true);
+    NagSuppressions.addResourceSuppressions(pipelineArtifactsBucket, [
+      { id: 'AwsSolutions-S1', reason: 'Pipeline artifacts bucket is internal; access logged via CloudTrail' },
+    ]);
+    NagSuppressions.addResourceSuppressions(dbCluster, [
+      { id: 'AwsSolutions-IAM4', appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole'], reason: 'Standard RDS Enhanced Monitoring managed policy' },
+    ], true);
   }
 }

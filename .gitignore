@@ -4,3 +4,4 @@ cdk.out/
 !jest.config.js
 *.d.ts
 .venv/
+.kiro/

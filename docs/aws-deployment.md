@@ -1083,7 +1083,92 @@ aws ecs run-task \
 
 ---
 
-## 14. Collabora に関する制約事項
+## 14. 運用監視
+
+CDK スタックに以下の監視設定が含まれている。
+
+### 14.1 ログ収集
+
+| ソース | 出力先 | 保持期間 |
+|---|---|---|
+| ECS 全コンテナ (Nextcloud, Apache, Notify-push, OnlyOffice, SigV4 Proxy) | CloudWatch Logs | 30日 |
+| VPC Flow Log | CloudWatch Logs | 2年 |
+| ALB アクセスログ | S3 (`AccessLogBucket/alb/`) | 無期限 |
+| S3 DataBucket アクセスログ | S3 (`AccessLogBucket/data-bucket/`) | 無期限 |
+| Step Functions 実行ログ | CloudWatch Logs (ALL レベル) | 30日 |
+
+### 14.2 ログメトリクスフィルター
+
+ECS ログから `ERROR` / `CRITICAL` / `Fatal` を含む行を抽出し、カスタムメトリクスとして発行する。
+
+| メトリクス名 | 名前空間 | 内容 |
+|---|---|---|
+| `ErrorCount` | `Nextcloud` | アプリケーションエラーログの件数 |
+
+### 14.3 Aurora モニタリング
+
+| 機能 | 設定 |
+|---|---|
+| Performance Insights | 有効（7日間保持） |
+| Enhanced Monitoring | 有効（60秒間隔） |
+| IAM データベース認証 | 有効 |
+
+### 14.4 CloudWatch Alarms
+
+| アラーム | メトリクス | 条件 |
+|---|---|---|
+| NextcloudCpuAlarm | ECS Nextcloud CPU | > 80% が 15分継続 |
+| NextcloudMemoryAlarm | ECS Nextcloud Memory | > 85% が 15分継続 |
+| ApacheCpuAlarm | ECS Apache CPU | > 80% が 15分継続 |
+| Alb5xxAlarm | ALB 5xx エラー数 | > 10回/5分 が 10分継続 |
+| Target5xxAlarm | ターゲット 5xx エラー数 | > 10回/5分 が 10分継続 |
+| ResponseTimeAlarm | ALB p95 レスポンスタイム | > 5秒 が 15分継続 |
+| UnhealthyTargetsAlarm | ALB Unhealthy Host 数 | ≥ 1台 が 3分継続 |
+| AuroraCpuAlarm | Aurora CPU 使用率 | > 80% が 15分継続 |
+| AuroraCapacityAlarm | Aurora Serverless ACU | > 最大ACUの80% が 15分継続 |
+| AuroraMemoryAlarm | Aurora 空きメモリ | < 256MB が 15分継続 |
+| ErrorLogAlarm | アプリケーションエラーログ数 | > 50件/10分 |
+
+> **注意**: アラームに SNS トピックは未設定。通知が必要な場合は SNS トピックを作成し、各アラームに `addAlarmAction()` で接続する。
+
+### 14.5 CloudWatch Dashboard
+
+ダッシュボード名: `Nextcloud-Monitoring`
+
+| 行 | ウィジェット | 内容 |
+|---|---|---|
+| 1 | ECS CPU Utilization | Nextcloud / Apache / Notify-push の CPU 使用率 |
+| 1 | ECS Memory Utilization | Nextcloud / Apache / Notify-push のメモリ使用率 |
+| 2 | ALB Request Count & Errors | リクエスト数、5xx エラー数 |
+| 2 | ALB Response Time | p50 / p95 / p99 レスポンスタイム |
+| 3 | Aurora CPU & Capacity | CPU 使用率、Serverless ACU |
+| 3 | Aurora Connections & Latency | 接続数、Read/Write レイテンシ |
+| 4 | Application Error Logs | エラーログ件数の推移 |
+| 4 | Running Tasks | ECS タスクの稼働状況 |
+
+### 14.6 トレーシング
+
+| リソース | 設定 |
+|---|---|
+| Step Functions | X-Ray トレース有効 |
+| ECS Container Insights | CPU / メモリ / ネットワーク / ストレージメトリクス |
+
+### 14.7 デバッグ
+
+全 ECS Service で `enableExecuteCommand: true` が設定されている。稼働中のタスクに接続可能:
+
+```bash
+aws ecs execute-command \
+  --cluster NextcloudAioStack-Cluster \
+  --task <task-id> \
+  --container nextcloud \
+  --interactive \
+  --command "/bin/bash"
+```
+
+---
+
+## 15. Collabora に関する制約事項
 
 Fargate は以下の Linux Capability の追加をサポートしていない:
 
