@@ -208,6 +208,21 @@ export class NextcloudAioStack extends cdk.Stack {
       },
     }) : undefined;
 
+    // Imaginary + Talk secrets (declared early for Nextcloud container reference)
+    const imaginarySecret = enableImaginary ? new secretsmanager.Secret(this, 'ImaginarySecret', {
+      generateSecretString: { excludePunctuation: true, passwordLength: 32 },
+    }) : undefined;
+    const talkSecret = enableTalk ? new secretsmanager.Secret(this, 'TalkSecret', {
+      generateSecretString: { excludePunctuation: true, passwordLength: 32 },
+    }) : undefined;
+    const signalingSecret = enableTalk ? new secretsmanager.Secret(this, 'SignalingSecret', {
+      generateSecretString: { excludePunctuation: true, passwordLength: 32 },
+    }) : undefined;
+    const talkInternalSecret = enableTalk ? new secretsmanager.Secret(this, 'TalkInternalSecret', {
+      generateSecretString: { excludePunctuation: true, passwordLength: 32 },
+    }) : undefined;
+    let talkNlbDns = '';
+
     if (enableFulltextsearch) {
       const osSg = new ec2.SecurityGroup(this, 'OsSg', { vpc, description: 'OpenSearch' });
       osSg.addIngressRule(ecsSg, ec2.Port.tcp(443));
@@ -260,6 +275,7 @@ export class NextcloudAioStack extends cdk.Stack {
     dbSecret.grantRead(executionRole);
     cacheSecret.grantRead(executionRole);
     if (osSecret) osSecret.grantRead(executionRole);
+    if (imaginarySecret) imaginarySecret.grantRead(executionRole);
 
     // ========================================
     // 10. Log Groups
@@ -364,6 +380,9 @@ def handler(event, context):
         POSTGRES_PASSWORD: ecs.Secret.fromSecretsManager(dbSecret, 'password'),
         REDIS_HOST_PASSWORD: ecs.Secret.fromSecretsManager(cacheSecret),
         ...(enableFulltextsearch && osSecret ? { FULLTEXTSEARCH_PASSWORD: ecs.Secret.fromSecretsManager(osSecret, 'password') } : {}),
+        ...(enableTalk && talkSecret ? { TURN_SECRET: ecs.Secret.fromSecretsManager(talkSecret) } : {}),
+        ...(enableTalk && signalingSecret ? { SIGNALING_SECRET: ecs.Secret.fromSecretsManager(signalingSecret) } : {}),
+        ...(enableImaginary && imaginarySecret ? { IMAGINARY_SECRET: ecs.Secret.fromSecretsManager(imaginarySecret) } : {}),
       },
       environment: {
         POSTGRES_HOST: dbCluster.clusterEndpoint.hostname,
@@ -394,9 +413,13 @@ def handler(event, context):
         ONLYOFFICE_HOST: 'nextcloud-aio-onlyoffice.nextcloud.local',
         ONLYOFFICE_SECRET: 'changeme-onlyoffice-secret',
         TALK_ENABLED: enableTalk ? 'yes' : 'no',
+        TALK_HOST: 'nextcloud-aio-talk.nextcloud.local',
+        TALK_PORT: '3478',
+        TURN_DOMAIN: talkNlbDns || domain,
         COLLABORA_ENABLED: 'no',
         CLAMAV_ENABLED: enableClamav ? 'yes' : 'no',
         IMAGINARY_ENABLED: enableImaginary ? 'yes' : 'no',
+        IMAGINARY_HOST: enableImaginary ? 'nextcloud-aio-imaginary.nextcloud.local' : '',
         FULLTEXTSEARCH_ENABLED: enableFulltextsearch ? 'yes' : 'no',
         FULLTEXTSEARCH_HOST: enableFulltextsearch && osDomain ? osDomain.domainEndpoint : '',
         FULLTEXTSEARCH_PORT: enableFulltextsearch ? '443' : '',
@@ -557,6 +580,104 @@ def handler(event, context):
       createService('onlyoffice', ooTd, 80);
       NagSuppressions.addResourceSuppressions(ooTd, [
         { id: 'AwsSolutions-ECS2', reason: 'Non-sensitive configuration values (feature flags) passed as environment variables' },
+      ]);
+    }
+
+    // ========================================
+    // 14b. Imaginary (optional)
+    // ========================================
+    if (enableImaginary && imaginarySecret) {
+      const imgTd = new ecs.FargateTaskDefinition(this, 'ImaginaryTd', {
+        cpu: 512, memoryLimitMiB: 1024,
+        taskRole, executionRole,
+      });
+      imgTd.addContainer('imaginary', {
+        image: ecs.ContainerImage.fromRegistry(`ghcr.io/nextcloud-releases/aio-imaginary:${aioImageTag}`),
+        logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'imaginary', logGroup }),
+        portMappings: [{ containerPort: 9000 }],
+        healthCheck: {
+          command: ['CMD-SHELL', '/healthcheck.sh'],
+          interval: cdk.Duration.seconds(30),
+          timeout: cdk.Duration.seconds(30),
+          retries: 3,
+        },
+        environment: { TZ: 'Asia/Tokyo' },
+        secrets: { IMAGINARY_SECRET: ecs.Secret.fromSecretsManager(imaginarySecret) },
+      });
+      createService('imaginary', imgTd, 9000);
+    }
+
+    // ========================================
+    // 14c. Talk (optional)
+    // ========================================
+    if (enableTalk && talkSecret && signalingSecret && talkInternalSecret) {
+      const talkSg = new ec2.SecurityGroup(this, 'TalkSg', { vpc, description: 'Talk TURN' });
+      talkSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(3478), 'TURN TCP');
+      talkSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.udp(3478), 'TURN UDP');
+
+      const talkTd = new ecs.FargateTaskDefinition(this, 'TalkTd', {
+        cpu: 512, memoryLimitMiB: 1024,
+        taskRole, executionRole,
+      });
+      talkTd.addContainer('talk', {
+        image: ecs.ContainerImage.fromRegistry(`ghcr.io/nextcloud-releases/aio-talk:${aioImageTag}`),
+        logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'talk', logGroup }),
+        portMappings: [
+          { containerPort: 8081, protocol: ecs.Protocol.TCP },
+          { containerPort: 3478, protocol: ecs.Protocol.TCP },
+          { containerPort: 3478, protocol: ecs.Protocol.UDP },
+        ],
+        healthCheck: {
+          command: ['CMD-SHELL', '/healthcheck.sh'],
+          interval: cdk.Duration.seconds(30),
+          timeout: cdk.Duration.seconds(30),
+          retries: 3,
+        },
+        environment: {
+          NC_DOMAIN: domain,
+          TALK_HOST: 'nextcloud-aio-talk.nextcloud.local',
+          TALK_PORT: '3478',
+          TZ: 'Asia/Tokyo',
+        },
+        secrets: {
+          TURN_SECRET: ecs.Secret.fromSecretsManager(talkSecret),
+          SIGNALING_SECRET: ecs.Secret.fromSecretsManager(signalingSecret),
+          INTERNAL_SECRET: ecs.Secret.fromSecretsManager(talkInternalSecret),
+        },
+      });
+
+      const talkSvc = new ecs.FargateService(this, 'TalkService', {
+        cluster,
+        taskDefinition: talkTd,
+        desiredCount: 1,
+        securityGroups: [ecsSg, talkSg],
+        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        cloudMapOptions: {
+          name: 'nextcloud-aio-talk',
+          cloudMapNamespace: namespace,
+          dnsRecordType: servicediscovery.DnsRecordType.A,
+          dnsTtl: cdk.Duration.seconds(10),
+        },
+        enableExecuteCommand: true,
+      });
+
+      // NLB for TURN (TCP+UDP:3478)
+      const nlb = new elbv2.NetworkLoadBalancer(this, 'TalkNlb', {
+        vpc,
+        internetFacing: true,
+        crossZoneEnabled: true,
+      });
+      const tcpTarget = nlb.addListener('TurnTcp', { port: 3478, protocol: elbv2.Protocol.TCP })
+        .addTargets('TurnTcpTarget', { port: 3478, protocol: elbv2.Protocol.TCP, targets: [talkSvc], healthCheck: { protocol: elbv2.Protocol.TCP } });
+      const udpTarget = nlb.addListener('TurnUdp', { port: 3478, protocol: elbv2.Protocol.UDP })
+        .addTargets('TurnUdpTarget', { port: 3478, protocol: elbv2.Protocol.UDP, healthCheck: { protocol: elbv2.Protocol.TCP, port: '8081' } });
+
+      talkNlbDns = nlb.loadBalancerDnsName;
+      new cdk.CfnOutput(this, 'TalkNlbDns', { value: nlb.loadBalancerDnsName });
+
+      [talkSecret, signalingSecret, talkInternalSecret].forEach(s => s.grantRead(executionRole));
+      NagSuppressions.addResourceSuppressions(talkSg, [
+        { id: 'AwsSolutions-EC23', reason: 'TURN server requires public access on port 3478 for WebRTC relay' },
       ]);
     }
 
