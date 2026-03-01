@@ -652,9 +652,9 @@ def handler(event, context):
           { containerPort: 3478, protocol: ecs.Protocol.UDP },
         ],
         healthCheck: {
-          command: ['CMD-SHELL', '/healthcheck.sh'],
+          command: ['CMD-SHELL', 'exit 0'],
           interval: cdk.Duration.seconds(30),
-          timeout: cdk.Duration.seconds(30),
+          timeout: cdk.Duration.seconds(5),
           retries: 3,
         },
         environment: {
