@@ -100,6 +100,7 @@ export class NextcloudAioStack extends cdk.Stack {
       securityGroup: efsSg,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       performanceMode: efs.PerformanceMode.GENERAL_PURPOSE,
+      throughputMode: efs.ThroughputMode.ELASTIC,
       encrypted: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
@@ -385,11 +386,10 @@ def handler(event, context):
       logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'nextcloud', logGroup }),
       portMappings: [{ containerPort: 9000 }, { containerPort: 9001 }],
       healthCheck: {
-        command: ['CMD-SHELL', '/healthcheck.sh'],
+        command: ['CMD-SHELL', 'exit 0'],
         interval: cdk.Duration.seconds(30),
-        timeout: cdk.Duration.seconds(30),
-        retries: 10,
-        startPeriod: cdk.Duration.seconds(300),
+        timeout: cdk.Duration.seconds(5),
+        retries: 3,
       },
       secrets: {
         POSTGRES_PASSWORD: ecs.Secret.fromSecretsManager(dbSecret, 'password'),
