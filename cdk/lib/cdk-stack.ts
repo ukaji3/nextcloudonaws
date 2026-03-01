@@ -455,7 +455,7 @@ def handler(event, context):
       { sourceVolume: 'nextcloud-data', containerPath: '/mnt/ncdata', readOnly: false },
     );
 
-    const nextcloudSvc = createService('nextcloud', nextcloudTd, 9000, { desiredCount: 2, minCapacity: 2, maxCapacity: 10 });
+    const nextcloudSvc = createService('nextcloud', nextcloudTd, 9000, { desiredCount: 1, minCapacity: 1, maxCapacity: 10 });
 
     // ========================================
     // 12. Apache Task Definition
