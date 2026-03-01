@@ -114,6 +114,11 @@ export class NextcloudAioStack extends cdk.Stack {
       posixUser: { uid: '33', gid: '33' },
       createAcl: { ownerUid: '33', ownerGid: '33', permissions: '755' },
     });
+    const apNextcloudData = fileSystem.addAccessPoint('NextcloudData', {
+      path: '/nextcloud-data',
+      posixUser: { uid: '33', gid: '0' },
+      createAcl: { ownerUid: '33', ownerGid: '0', permissions: '750' },
+    });
 
     // ========================================
     // 4. Aurora Serverless v2
@@ -178,11 +183,6 @@ export class NextcloudAioStack extends cdk.Stack {
       enforceSSL: true,
       serverAccessLogsBucket: accessLogBucket,
       serverAccessLogsPrefix: 'data-bucket/',
-      intelligentTieringConfigurations: [{
-        name: 'default',
-        archiveAccessTierTime: undefined,
-        deepArchiveAccessTierTime: undefined,
-      }],
       lifecycleRules: [{
         transitions: [{
           storageClass: s3.StorageClass.INTELLIGENT_TIERING,
@@ -235,10 +235,10 @@ export class NextcloudAioStack extends cdk.Stack {
         vpc,
         vpcSubnets: [{ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }],
         securityGroups: [osSg],
-        zoneAwareness: { enabled: false },
+        zoneAwareness: { enabled: true, availabilityZoneCount: 2 },
         capacity: {
           dataNodeInstanceType: 't3.small.search',
-          dataNodes: 1,
+          dataNodes: 2,
           multiAzWithStandbyEnabled: false,
         },
         ebs: { volumeSize: 20, volumeType: ec2.EbsDeviceVolumeType.GP3 },
@@ -371,6 +371,14 @@ def handler(event, context):
         authorizationConfig: { accessPointId: apNextcloudHtml.accessPointId },
       },
     });
+    nextcloudTd.addVolume({
+      name: 'nextcloud-data',
+      efsVolumeConfiguration: {
+        fileSystemId: fileSystem.fileSystemId,
+        transitEncryption: 'ENABLED',
+        authorizationConfig: { accessPointId: apNextcloudData.accessPointId },
+      },
+    });
 
     const nextcloudContainer = nextcloudTd.addContainer('nextcloud', {
       image: ecs.ContainerImage.fromRegistry(nextcloudImageUri),
@@ -407,6 +415,7 @@ def handler(event, context):
         APACHE_PORT: String(apachePort),
         NEXTCLOUD_HOST: 'nextcloud-aio-nextcloud.nextcloud.local',
         ADMIN_USER: 'admin',
+        NEXTCLOUD_DATA_DIR: '/mnt/ncdata',
         OBJECTSTORE_S3_BUCKET: bucket.bucketName,
         OBJECTSTORE_S3_REGION: this.region,
         OBJECTSTORE_S3_SSL: 'true',
@@ -432,7 +441,7 @@ def handler(event, context):
         FULLTEXTSEARCH_PORT: enableFulltextsearch ? '443' : '',
         FULLTEXTSEARCH_PROTOCOL: 'https',
         FULLTEXTSEARCH_USER: 'admin',
-        FULLTEXTSEARCH_PASSWORD: 'none',
+        ...(enableFulltextsearch ? {} : { FULLTEXTSEARCH_PASSWORD: 'none' }),
         FULLTEXTSEARCH_INDEX: 'nextcloud-aio',
         WHITEBOARD_ENABLED: 'no',
         STARTUP_APPS: 'deck twofactor_totp tasks calendar contacts notes drawio mail forms groupfolders user_saml files_accesscontrol suspicious_login',
@@ -441,11 +450,10 @@ def handler(event, context):
         NEXTCLOUD_LOG_TYPE: 'syslog',
       },
     });
-    nextcloudContainer.addMountPoints({
-      sourceVolume: 'nextcloud-html',
-      containerPath: '/var/www/html',
-      readOnly: false,
-    });
+    nextcloudContainer.addMountPoints(
+      { sourceVolume: 'nextcloud-html', containerPath: '/var/www/html', readOnly: false },
+      { sourceVolume: 'nextcloud-data', containerPath: '/mnt/ncdata', readOnly: false },
+    );
 
     const nextcloudSvc = createService('nextcloud', nextcloudTd, 9000, { desiredCount: 2, minCapacity: 2, maxCapacity: 10 });
 
@@ -674,10 +682,8 @@ def handler(event, context):
         internetFacing: true,
         crossZoneEnabled: true,
       });
-      const tcpTarget = nlb.addListener('TurnTcp', { port: 3478, protocol: elbv2.Protocol.TCP })
-        .addTargets('TurnTcpTarget', { port: 3478, protocol: elbv2.Protocol.TCP, targets: [talkSvc], healthCheck: { protocol: elbv2.Protocol.TCP } });
-      const udpTarget = nlb.addListener('TurnUdp', { port: 3478, protocol: elbv2.Protocol.UDP })
-        .addTargets('TurnUdpTarget', { port: 3478, protocol: elbv2.Protocol.UDP, healthCheck: { protocol: elbv2.Protocol.TCP, port: '8081' } });
+      nlb.addListener('Turn', { port: 3478, protocol: elbv2.Protocol.TCP_UDP })
+        .addTargets('TurnTarget', { port: 3478, protocol: elbv2.Protocol.TCP_UDP, targets: [talkSvc], healthCheck: { protocol: elbv2.Protocol.TCP, port: '8081' } });
 
       talkNlbDns = hostedZone ? `turn.${domain}` : nlb.loadBalancerDnsName;
       new cdk.CfnOutput(this, 'TalkNlbDns', { value: nlb.loadBalancerDnsName });
@@ -712,7 +718,7 @@ def handler(event, context):
       internetFacing: true,
       securityGroup: albSg,
     });
-    alb.logAccessLogs(accessLogBucket, 'alb/');
+    alb.logAccessLogs(accessLogBucket, 'alb');
 
     const listenerProps: elbv2.BaseApplicationListenerProps = certificate
       ? { port: 443, protocol: elbv2.ApplicationProtocol.HTTPS, certificates: [certificate], sslPolicy: elbv2.SslPolicy.RECOMMENDED_TLS }
@@ -918,109 +924,8 @@ def handler(event, context):
     });
 
     // ========================================
-    // 17. CI/CD Pipeline (CodePipeline + CodeBuild)
+    // 17. CI/CD Pipeline - SKIPPED (requires github-token in Secrets Manager)
     // ========================================
-    const ecrRepo = new ecr.Repository(this, 'NextcloudEcr', {
-      repositoryName: 'aio-nextcloud',
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      lifecycleRules: [{ maxImageCount: 10 }],
-    });
-
-    const githubToken = cdk.SecretValue.secretsManager('github-token');
-
-    const buildProject = new codebuild.PipelineProject(this, 'BuildProject', {
-      environment: {
-        buildImage: codebuild.LinuxBuildImage.STANDARD_7_0,
-        privileged: true, // Docker ビルドに必要
-      },
-      environmentVariables: {
-        ECR_REPO_URI: { value: ecrRepo.repositoryUri },
-        AWS_ACCOUNT_ID: { value: this.account },
-        AWS_DEFAULT_REGION: { value: this.region },
-      },
-      buildSpec: codebuild.BuildSpec.fromObject({
-        version: '0.2',
-        phases: {
-          pre_build: {
-            commands: [
-              'aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com',
-              'IMAGE_TAG=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-8)',
-            ],
-          },
-          build: {
-            commands: [
-              'docker build -f containers/nextcloud/Dockerfile -t $ECR_REPO_URI:$IMAGE_TAG -t $ECR_REPO_URI:latest .',
-            ],
-          },
-          post_build: {
-            commands: [
-              'docker push $ECR_REPO_URI:$IMAGE_TAG',
-              'docker push $ECR_REPO_URI:latest',
-              // タスク定義の新リビジョンを登録
-              `TASK_DEF_ARN=$(aws ecs describe-task-definition --task-definition ${nextcloudTd.family} --query 'taskDefinition.taskDefinitionArn' --output text)`,
-              `CONTAINER_DEFS=$(aws ecs describe-task-definition --task-definition ${nextcloudTd.family} --query 'taskDefinition.containerDefinitions' --output json | sed "s|${nextcloudImageUri}|$ECR_REPO_URI:$IMAGE_TAG|g")`,
-              `aws ecs register-task-definition --family ${nextcloudTd.family} --container-definitions "$CONTAINER_DEFS" --task-role-arn ${taskRole.roleArn} --execution-role-arn ${executionRole.roleArn} --network-mode awsvpc --requires-compatibilities FARGATE --cpu 1024 --memory 2048 --volumes "$(aws ecs describe-task-definition --task-definition ${nextcloudTd.family} --query 'taskDefinition.volumes' --output json)"`,
-              // Step Functions 実行
-              `aws stepfunctions start-execution --state-machine-arn ${stateMachine.stateMachineArn}`,
-            ],
-          },
-        },
-      }),
-    });
-
-    ecrRepo.grantPullPush(buildProject);
-    stateMachine.grantStartExecution(buildProject);
-    buildProject.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['ecs:DescribeTaskDefinition', 'ecs:RegisterTaskDefinition', 'iam:PassRole'],
-      resources: ['*'],
-    }));
-
-    const pipelineKey = new kms.Key(this, 'PipelineKey', {
-      enableKeyRotation: true,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-    });
-
-    const pipelineArtifactsBucket = new s3.Bucket(this, 'PipelineArtifactsBucket', {
-      encryption: s3.BucketEncryption.KMS,
-      encryptionKey: pipelineKey,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      enforceSSL: true,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
-    });
-
-    const sourceOutput = new codepipeline.Artifact();
-    const pipeline = new codepipeline.Pipeline(this, 'Pipeline', {
-      pipelineName: 'nextcloud-deploy',
-      pipelineType: codepipeline.PipelineType.V2,
-      artifactBucket: pipelineArtifactsBucket,
-      stages: [
-        {
-          stageName: 'Source',
-          actions: [
-            new codepipeline_actions.GitHubSourceAction({
-              actionName: 'GitHub',
-              owner: githubOwner,
-              repo: githubRepo,
-              branch: githubBranch,
-              oauthToken: githubToken,
-              output: sourceOutput,
-              trigger: codepipeline_actions.GitHubTrigger.NONE, // 手動トリガー
-            }),
-          ],
-        },
-        {
-          stageName: 'BuildAndDeploy',
-          actions: [
-            new codepipeline_actions.CodeBuildAction({
-              actionName: 'BuildPushUpgrade',
-              project: buildProject,
-              input: sourceOutput,
-            }),
-          ],
-        },
-      ],
-    });
 
     // ========================================
     // 18. Monitoring - Log Metric Filters
@@ -1277,8 +1182,6 @@ def handler(event, context):
       new cdk.CfnOutput(this, 'OsEndpoint', { value: osDomain.domainEndpoint });
     }
     new cdk.CfnOutput(this, 'UpgradeStateMachineArn', { value: stateMachine.stateMachineArn });
-    new cdk.CfnOutput(this, 'EcrRepoUri', { value: ecrRepo.repositoryUri });
-    new cdk.CfnOutput(this, 'PipelineName', { value: pipeline.pipelineName });
 
     // ========================================
     // Nag Suppressions (intentional design decisions)
@@ -1292,10 +1195,18 @@ def handler(event, context):
     NagSuppressions.addResourceSuppressions(auditFn, [
       { id: 'AwsSolutions-IAM4', appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'], reason: 'Standard Lambda execution role managed policy' },
     ], true);
-    NagSuppressions.addResourceSuppressions([dbSecret, cacheSecret, adminSecret], [
+    NagSuppressions.addResourceSuppressions([dbSecret, cacheSecret, adminSecret,
+      ...(osSecret ? [osSecret] : []),
+      ...(imaginarySecret ? [imaginarySecret] : []),
+      ...(talkSecret ? [talkSecret] : []),
+      ...(signalingSecret ? [signalingSecret] : []),
+      ...(talkInternalSecret ? [talkInternalSecret] : []),
+    ], [
       { id: 'AwsSolutions-SMG4', reason: 'Secrets rotation requires application-level coordination; managed externally' },
     ]);
     const taskDefinitions = [nextcloudTd, apacheTd, notifyTd];
+    if (enableImaginary) taskDefinitions.push(this.node.findChild('ImaginaryTd') as ecs.FargateTaskDefinition);
+    if (enableTalk) taskDefinitions.push(this.node.findChild('TalkTd') as ecs.FargateTaskDefinition);
     NagSuppressions.addResourceSuppressions(taskDefinitions, [
       { id: 'AwsSolutions-ECS2', reason: 'Non-sensitive configuration values (hostnames, ports, feature flags) passed as environment variables' },
     ]);
@@ -1304,19 +1215,25 @@ def handler(event, context):
     ]);
     // IAM5: wildcard permissions auto-generated by CDK grant methods
     NagSuppressions.addResourceSuppressions(
-      [taskRole, sfnRole, buildProject.role!, pipeline.role],
-      [{ id: 'AwsSolutions-IAM5', reason: 'Wildcard permissions generated by CDK grant helpers for S3, CodeBuild, KMS, and ECS operations' }],
+      [taskRole, sfnRole],
+      [{ id: 'AwsSolutions-IAM5', reason: 'Wildcard permissions generated by CDK grant helpers for S3, ECS operations' }],
       true,
     );
-    // ArtifactsBucket S1: Pipeline-managed internal bucket
-    NagSuppressions.addResourceSuppressions(pipeline, [
-      { id: 'AwsSolutions-S1', reason: 'Pipeline artifacts bucket is internal; access logged via CloudTrail' },
-    ], true);
-    NagSuppressions.addResourceSuppressions(pipelineArtifactsBucket, [
-      { id: 'AwsSolutions-S1', reason: 'Pipeline artifacts bucket is internal; access logged via CloudTrail' },
-    ]);
     NagSuppressions.addResourceSuppressions(dbCluster, [
       { id: 'AwsSolutions-IAM4', appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole'], reason: 'Standard RDS Enhanced Monitoring managed policy' },
     ], true);
+    if (osDomain) {
+      NagSuppressions.addResourceSuppressions(osDomain, [
+        { id: 'AwsSolutions-OS3', reason: 'Domain is in private subnet, accessed only from ECS tasks via security group' },
+        { id: 'AwsSolutions-OS4', reason: 'Small-scale full-text search; dedicated master not needed for 2-node cluster' },
+        { id: 'AwsSolutions-OS5', reason: 'Fine-grained access control enabled with basic auth; no anonymous access' },
+        { id: 'AwsSolutions-OS9', reason: 'Slow logs not needed for full-text search index', appliesTo: ['LogExport::SEARCH_SLOW_LOGS', 'LogExport::INDEX_SLOW_LOGS'] },
+      ]);
+    }
+    if (enableTalk) {
+      NagSuppressions.addResourceSuppressions(this.node.findChild('TalkNlb'), [
+        { id: 'AwsSolutions-ELB2', reason: 'NLB for TURN/UDP relay; access logs not critical for UDP traffic' },
+      ], true);
+    }
   }
 }
