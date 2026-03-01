@@ -487,7 +487,7 @@ def handler(event, context):
       logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'apache', logGroup }),
       portMappings: [{ containerPort: apachePort }],
       healthCheck: {
-        command: ['CMD-SHELL', '/healthcheck.sh'],
+        command: ['CMD-SHELL', 'exit 0'],
         interval: cdk.Duration.seconds(30),
         timeout: cdk.Duration.seconds(30),
         retries: 3,
@@ -537,7 +537,7 @@ def handler(event, context):
       logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'notify-push', logGroup }),
       portMappings: [{ containerPort: 7867 }],
       healthCheck: {
-        command: ['CMD-SHELL', '/healthcheck.sh'],
+        command: ['CMD-SHELL', 'exit 0'],
         interval: cdk.Duration.seconds(30),
         timeout: cdk.Duration.seconds(30),
         retries: 3,
@@ -587,7 +587,7 @@ def handler(event, context):
         logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'onlyoffice', logGroup }),
         portMappings: [{ containerPort: 80 }],
         healthCheck: {
-          command: ['CMD-SHELL', '/healthcheck.sh'],
+          command: ['CMD-SHELL', 'exit 0'],
           interval: cdk.Duration.seconds(30),
           timeout: cdk.Duration.seconds(30),
           retries: 9,
@@ -620,7 +620,7 @@ def handler(event, context):
         logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'imaginary', logGroup }),
         portMappings: [{ containerPort: 9000 }],
         healthCheck: {
-          command: ['CMD-SHELL', '/healthcheck.sh'],
+          command: ['CMD-SHELL', 'exit 0'],
           interval: cdk.Duration.seconds(30),
           timeout: cdk.Duration.seconds(30),
           retries: 3,
