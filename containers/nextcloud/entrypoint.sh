@@ -313,6 +313,42 @@ if ! [ -f "$NEXTCLOUD_DATA_DIR/skip.update" ]; then
             "$SOURCE_LOCATION/" \
             /var/www/html/
 
+        # Patch Redis.php: replace KEYS with SCAN for ElastiCache Serverless compatibility
+        if [ -f /var/www/html/lib/private/Memcache/Redis.php ]; then
+            sed -i '/public function clear/,/^    }/ c\
+    public function clear($prefix = '"'"''"'"') {\
+        $prefix = $this->getPrefix() . $prefix . '"'"'*'"'"';\
+        $keys = [];\
+        $cursor = null;\
+        $cache = $this->getCache();\
+        if ($cache instanceof \\RedisCluster) {\
+            $masters = $cache->_masters();\
+            foreach ($masters as $master) {\
+                $cursor = null;\
+                do {\
+                    $result = $cache->scan($cursor, $master, $prefix, 1000);\
+                    if ($result !== false) {\
+                        $keys = array_merge($keys, $result);\
+                    }\
+                } while ($cursor > 0);\
+            }\
+        } else {\
+            do {\
+                $result = $cache->scan($cursor, $prefix, 1000);\
+                if ($result !== false) {\
+                    $keys = array_merge($keys, $result);\
+                }\
+            } while ($cursor > 0);\
+        }\
+        if (empty($keys)) {\
+            return true;\
+        }\
+        $deleted = $cache->del($keys);\
+        return count($keys) === $deleted;\
+    }' /var/www/html/lib/private/Memcache/Redis.php
+            echo "Patched Redis.php: KEYS replaced with SCAN"
+        fi
+
         echo "Initializing finished"
 
         ################
@@ -365,7 +401,18 @@ EOF
             fi
 
             # Try to force generation of appdata dir:
-            php /var/www/html/occ maintenance:repair
+            echo "[DEBUG] Starting maintenance:repair"
+            echo "[DEBUG] REDIS_HOST=$REDIS_HOST REDIS_PORT=$REDIS_PORT REDIS_MODE=$REDIS_MODE REDIS_TLS_ENABLED=$REDIS_TLS_ENABLED"
+            echo "[DEBUG] REDIS_HOST_PASSWORD set: $([ -n "$REDIS_HOST_PASSWORD" ] && echo yes || echo no)"
+            echo "[DEBUG] POSTGRES_HOST=$POSTGRES_HOST POSTGRES_PORT=$POSTGRES_PORT POSTGRES_USER=$POSTGRES_USER POSTGRES_DB=$POSTGRES_DB"
+            echo "[DEBUG] POSTGRES_PASSWORD set: $([ -n "$POSTGRES_PASSWORD" ] && echo yes || echo no)"
+            echo "[DEBUG] config.php dbuser: $(grep dbuser /var/www/html/config/config.php 2>/dev/null || echo 'not found')"
+            echo "[DEBUG] Testing Redis TLS connection..."
+            timeout 5 openssl s_client -connect "$REDIS_HOST:$REDIS_PORT" -quiet </dev/null 2>&1 | head -3 || echo "[DEBUG] Redis TLS connection failed or timed out"
+            echo "[DEBUG] Running occ maintenance:repair -vvv"
+            php /var/www/html/occ maintenance:repair -vvv 2>&1
+            echo "[DEBUG] maintenance:repair exit code: $?"
+            echo "[DEBUG] maintenance:repair done"
 
             if [ -z "$OBJECTSTORE_S3_BUCKET" ] && [ -z "$OBJECTSTORE_SWIFT_URL" ]; then
                 max_retries=10
@@ -385,14 +432,18 @@ EOF
             fi
 
             # This autoconfig is not needed anymore and should be able to be overwritten by the user
+            echo "[DEBUG] Removing datadir permission config"
             rm /var/www/html/config/datadir.permission.config.php
 
             # unset admin password
             unset ADMIN_PASSWORD
 
             # Enable the updatenotification app but disable its UI and server update notifications
+            echo "[DEBUG] Setting updatechecker"
             php /var/www/html/occ config:system:set updatechecker --type=bool --value=false
+            echo "[DEBUG] Setting notify_groups"
             php /var/www/html/occ config:app:set updatenotification notify_groups --value="[]"
+            echo "[DEBUG] updatenotification done"
 
 # AIO update to latest start # Do not remove or change this line!
             if [ "$INSTALL_LATEST_MAJOR" = yes ]; then
@@ -435,7 +486,7 @@ EOF
 # AIO update to latest end # Do not remove or change this line!
 
             # Apply log settings
-            echo "Applying default settings..."
+            echo "[DEBUG] Applying default settings..."
             mkdir -p /var/www/html/data
             php /var/www/html/occ config:system:set loglevel --value="2" --type=integer
             if [ "$NEXTCLOUD_LOG_TYPE" = "syslog" ]; then
@@ -453,7 +504,7 @@ EOF
             php /var/www/html/occ config:system:set log.condition apps 0 --value="admin_audit"
 
             # Apply preview settings
-            echo "Applying preview settings..."
+            echo "[DEBUG] Applying preview settings..."
             php /var/www/html/occ config:system:set preview_max_x --value="2048" --type=integer
             php /var/www/html/occ config:system:set preview_max_y --value="2048" --type=integer
             php /var/www/html/occ config:system:set jpeg_quality --value="60" --type=integer
@@ -469,7 +520,7 @@ EOF
             php /var/www/html/occ config:system:set enable_previews --value=true --type=boolean
 
             # Apply other settings
-            echo "Applying other settings..."
+            echo "[DEBUG] Applying other settings..."
             # Add missing indices after new installation because they seem to be missing on new installation
             php /var/www/html/occ db:add-missing-indices
             php /var/www/html/occ config:system:set upgrade.disable-web --type=bool --value=true
@@ -481,6 +532,7 @@ EOF
             php /var/www/html/occ config:system:set share_folder --value="/Shared"
 
             # Install some apps by default
+            echo "[DEBUG] Installing startup apps: $STARTUP_APPS"
             if [ -n "$STARTUP_APPS" ]; then
                 read -ra STARTUP_APPS_ARRAY <<< "$STARTUP_APPS"
                 for app in "${STARTUP_APPS_ARRAY[@]}"; do
@@ -499,6 +551,8 @@ EOF
                     fi
                 done
             fi
+
+            echo "[DEBUG] Fresh install complete"
 
         #upgrade
         else

@@ -52,8 +52,8 @@ if (getenv('REDIS_MODE') !== 'rediscluster') {
   }
 
   $cluster_config = array(
-    'timeout' => 0.0,
-    'read_timeout' => 0.0,
+    'timeout' => 5.0,
+    'read_timeout' => 5.0,
     'failover_mode' => \RedisCluster::FAILOVER_ERROR,
     'seeds' => $seeds,
   );
