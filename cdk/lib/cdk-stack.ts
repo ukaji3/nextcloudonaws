@@ -389,7 +389,7 @@ def handler(event, context):
         interval: cdk.Duration.seconds(30),
         timeout: cdk.Duration.seconds(30),
         retries: 3,
-        startPeriod: cdk.Duration.seconds(120),
+        startPeriod: cdk.Duration.seconds(900),
       },
       secrets: {
         POSTGRES_PASSWORD: ecs.Secret.fromSecretsManager(dbSecret, 'password'),
