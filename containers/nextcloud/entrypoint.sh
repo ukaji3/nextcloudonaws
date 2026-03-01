@@ -267,7 +267,7 @@ if ! [ -f "$NEXTCLOUD_DATA_DIR/skip.update" ]; then
         echo "Initializing Nextcloud $image_version ..."
 
         # Copy over initial data from Nextcloud archive
-        rsync -rlD --delete \
+        rsync -rlD --inplace --delete \
             --exclude-from=/upgrade.exclude \
             "$SOURCE_LOCATION/" \
             /var/www/html/
@@ -278,7 +278,7 @@ if ! [ -f "$NEXTCLOUD_DATA_DIR/skip.update" ]; then
             for app in "$SOURCE_LOCATION/custom_apps"/*; do
                 app_id="$(basename "$app")"
                 mkdir -p "/var/www/html/custom_apps/$app_id"
-                rsync -rlD --delete \
+                rsync -rlD --inplace --delete \
                     --include "/$app_id/" \
                     --exclude '/*' \
                     "$SOURCE_LOCATION/custom_apps/" \
@@ -290,7 +290,7 @@ if ! [ -f "$NEXTCLOUD_DATA_DIR/skip.update" ]; then
         # Copy these from Nextcloud archive if they don't exist yet (i.e. new install)
         for dir in config data custom_apps themes; do
             if [ ! -d "/var/www/html/$dir" ] || directory_empty "/var/www/html/$dir"; then
-                rsync -rlD \
+                rsync -rlD --inplace \
                     --include "/$dir/" \
                     --exclude '/*' \
                     "$SOURCE_LOCATION/" \
@@ -298,7 +298,7 @@ if ! [ -f "$NEXTCLOUD_DATA_DIR/skip.update" ]; then
             fi
         done
 
-        rsync -rlD --delete \
+        rsync -rlD --inplace --delete \
             --include '/config/' \
             --exclude '/*' \
             --exclude '/config/CAN_INSTALL' \
@@ -307,7 +307,7 @@ if ! [ -f "$NEXTCLOUD_DATA_DIR/skip.update" ]; then
             "$SOURCE_LOCATION/" \
             /var/www/html/
 
-        rsync -rlD \
+        rsync -rlD --inplace \
             --include '/version.php' \
             --exclude '/*' \
             "$SOURCE_LOCATION/" \
