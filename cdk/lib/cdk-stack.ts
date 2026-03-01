@@ -388,8 +388,8 @@ def handler(event, context):
         command: ['CMD-SHELL', '/healthcheck.sh'],
         interval: cdk.Duration.seconds(30),
         timeout: cdk.Duration.seconds(30),
-        retries: 3,
-        startPeriod: cdk.Duration.seconds(900),
+        retries: 10,
+        startPeriod: cdk.Duration.seconds(300),
       },
       secrets: {
         POSTGRES_PASSWORD: ecs.Secret.fromSecretsManager(dbSecret, 'password'),
