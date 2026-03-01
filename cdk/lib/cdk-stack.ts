@@ -545,7 +545,16 @@ def handler(event, context):
       },
       environment: {
         NEXTCLOUD_HOST: 'nextcloud-aio-nextcloud.nextcloud.local',
+        POSTGRES_HOST: dbCluster.clusterEndpoint.hostname,
+        POSTGRES_PORT: '5432',
+        POSTGRES_DB: 'nextcloud_database',
+        POSTGRES_USER: 'nextcloud',
+        REDIS_HOST: cache.attrEndpointAddress,
+        REDIS_HOST_PORT: cache.attrEndpointPort,
         TZ: 'Asia/Tokyo',
+      },
+      secrets: {
+        POSTGRES_PASSWORD: ecs.Secret.fromSecretsManager(dbSecret, 'password'),
       },
     });
     notifyContainer.addMountPoints({ sourceVolume: 'nextcloud-html', containerPath: '/var/www/html', readOnly: true });
