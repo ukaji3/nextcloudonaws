@@ -125,7 +125,7 @@ export class NextcloudAioStack extends cdk.Stack {
     // ========================================
     const dbSecret = new secretsmanager.Secret(this, 'DbSecret', {
       generateSecretString: {
-        secretStringTemplate: JSON.stringify({ username: 'nextcloud' }),
+        secretStringTemplate: JSON.stringify({ username: 'oc_nextcloud' }),
         generateStringKey: 'password',
         excludePunctuation: true,
       },
@@ -393,7 +393,6 @@ def handler(event, context):
       },
       secrets: {
         POSTGRES_PASSWORD: ecs.Secret.fromSecretsManager(dbSecret, 'password'),
-        REDIS_HOST_PASSWORD: ecs.Secret.fromSecretsManager(cacheSecret),
         ADMIN_PASSWORD: ecs.Secret.fromSecretsManager(adminSecret),
         ...(enableFulltextsearch && osSecret ? { FULLTEXTSEARCH_PASSWORD: ecs.Secret.fromSecretsManager(osSecret, 'password') } : {}),
         ...(enableTalk && talkSecret ? { TURN_SECRET: ecs.Secret.fromSecretsManager(talkSecret) } : {}),
@@ -405,6 +404,7 @@ def handler(event, context):
         POSTGRES_PORT: '5432',
         POSTGRES_DB: 'nextcloud_database',
         POSTGRES_USER: 'nextcloud',
+        PGSSLCERT: '',
         REDIS_HOST: cache.attrEndpointAddress,
         REDIS_PORT: cache.attrEndpointPort,
         REDIS_TLS_ENABLED: 'true',
