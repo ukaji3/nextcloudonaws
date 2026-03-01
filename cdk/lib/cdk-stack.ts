@@ -638,6 +638,7 @@ def handler(event, context):
       const talkSg = new ec2.SecurityGroup(this, 'TalkSg', { vpc, description: 'Talk TURN' });
       talkSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(3478), 'TURN TCP');
       talkSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.udp(3478), 'TURN UDP');
+      talkSg.addIngressRule(ec2.Peer.ipv4(vpc.vpcCidrBlock), ec2.Port.tcp(8081), 'NLB health check');
 
       const talkTd = new ecs.FargateTaskDefinition(this, 'TalkTd', {
         cpu: 512, memoryLimitMiB: 1024,

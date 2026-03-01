@@ -6,3 +6,5 @@ cdk.out/
 .venv/
 .kiro/
 cdk/cdk.json
+.temp/
+
