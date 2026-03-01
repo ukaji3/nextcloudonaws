@@ -77,7 +77,7 @@ export class NextcloudAioStack extends cdk.Stack {
     // 2. Security Groups
     // ========================================
     const albSg = new ec2.SecurityGroup(this, 'AlbSg', { vpc, description: 'ALB' });
-    albSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443));
+    albSg.addIngressRule(ec2.Peer.ipv4('153.242.166.137/32'), ec2.Port.tcp(443));
 
     const ecsSg = new ec2.SecurityGroup(this, 'EcsSg', { vpc, description: 'ECS Tasks' });
     ecsSg.addIngressRule(albSg, ec2.Port.tcp(apachePort));
