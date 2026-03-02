@@ -1,4 +1,7 @@
 <?php
+if (!getenv('REDIS_HOST')) {
+  return;
+}
 if (getenv('REDIS_MODE') !== 'rediscluster') {
   $CONFIG = array(
     'memcache.distributed' => '\OC\Memcache\Redis',
