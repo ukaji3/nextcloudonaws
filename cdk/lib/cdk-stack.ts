@@ -545,6 +545,7 @@ def handler(event, context):
       },
       environment: {
         NEXTCLOUD_HOST: 'nextcloud-aio-nextcloud.nextcloud.local',
+        NC_DOMAIN: domain,
         POSTGRES_HOST: dbCluster.clusterEndpoint.hostname,
         POSTGRES_PORT: '5432',
         POSTGRES_DB: 'nextcloud_database',
