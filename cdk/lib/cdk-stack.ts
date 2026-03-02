@@ -347,6 +347,7 @@ def handler(event, context):
           dnsTtl: cdk.Duration.seconds(10),
         },
         enableExecuteCommand: true,
+        circuitBreaker: { enable: true, rollback: true },
       });
 
       if (opts?.maxCapacity) {
