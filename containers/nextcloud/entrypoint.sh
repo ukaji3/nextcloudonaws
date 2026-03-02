@@ -314,38 +314,8 @@ if ! [ -f "$NEXTCLOUD_DATA_DIR/skip.update" ]; then
             /var/www/html/
 
         # Patch Redis.php: replace KEYS with SCAN for ElastiCache Serverless compatibility
-        if [ -f /var/www/html/lib/private/Memcache/Redis.php ]; then
-            sed -i '/public function clear/,/^    }/ c\
-    public function clear($prefix = '"'"''"'"') {\
-        $prefix = $this->getPrefix() . $prefix . '"'"'*'"'"';\
-        $keys = [];\
-        $cursor = null;\
-        $cache = $this->getCache();\
-        if ($cache instanceof \\RedisCluster) {\
-            $masters = $cache->_masters();\
-            foreach ($masters as $master) {\
-                $cursor = null;\
-                do {\
-                    $result = $cache->scan($cursor, $master, $prefix, 1000);\
-                    if ($result !== false) {\
-                        $keys = array_merge($keys, $result);\
-                    }\
-                } while ($cursor > 0);\
-            }\
-        } else {\
-            do {\
-                $result = $cache->scan($cursor, $prefix, 1000);\
-                if ($result !== false) {\
-                    $keys = array_merge($keys, $result);\
-                }\
-            } while ($cursor > 0);\
-        }\
-        if (empty($keys)) {\
-            return true;\
-        }\
-        $deleted = $cache->del($keys);\
-        return count($keys) === $deleted;\
-    }' /var/www/html/lib/private/Memcache/Redis.php
+        if [ -f /var/www/html/lib/private/Memcache/Redis.php ] && [ -f /redis-patch.php ]; then
+            cp /redis-patch.php /var/www/html/lib/private/Memcache/Redis.php
             echo "Patched Redis.php: KEYS replaced with SCAN"
         fi
 
