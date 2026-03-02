@@ -745,6 +745,7 @@ def handler(event, context):
         interval: cdk.Duration.seconds(30),
         healthyThresholdCount: 2,
         unhealthyThresholdCount: 3,
+        healthyHttpCodes: '200,400',
       },
       stickinessCookieDuration: cdk.Duration.hours(1),
     });
