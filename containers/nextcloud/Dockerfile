@@ -14,7 +14,7 @@ ENV NEXTCLOUD_VERSION=32.0.6
 COPY --chmod=775 containers/nextcloud/*.sh /
 COPY --chmod=774 containers/nextcloud/upgrade.exclude /upgrade.exclude
 COPY containers/nextcloud/config/*.php /
-COPY containers/nextcloud/redis-patch.php /redis-patch.php
+COPY containers/nextcloud/redis-patch.php /opt/redis-patch.php
 COPY containers/nextcloud/supervisord.conf /supervisord.conf
 COPY containers/nextcloud/root.motd /root.motd
 

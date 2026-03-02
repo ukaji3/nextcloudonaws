@@ -314,8 +314,8 @@ if ! [ -f "$NEXTCLOUD_DATA_DIR/skip.update" ]; then
             /var/www/html/
 
         # Patch Redis.php: replace KEYS with SCAN for ElastiCache Serverless compatibility
-        if [ -f /var/www/html/lib/private/Memcache/Redis.php ] && [ -f /redis-patch.php ]; then
-            cp /redis-patch.php /var/www/html/lib/private/Memcache/Redis.php
+        if [ -f /var/www/html/lib/private/Memcache/Redis.php ] && [ -f /opt/redis-patch.php ]; then
+            cp /opt/redis-patch.php /var/www/html/lib/private/Memcache/Redis.php
             echo "Patched Redis.php: KEYS replaced with SCAN"
         fi
 
