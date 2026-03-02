@@ -320,6 +320,14 @@ if ! [ -f "$NEXTCLOUD_DATA_DIR/skip.update" ]; then
         fi
         # Diagnostic page
         [ -f /usr/src/nextcloud/diag.php ] && cp /usr/src/nextcloud/diag.php /var/www/html/diag.php
+        # PHP-FPM custom settings (clear_env + slowlog for debugging)
+        cat > /usr/local/etc/php-fpm.d/zzz-custom.conf << 'FPMEOF'
+[www]
+clear_env = no
+request_slowlog_timeout = 10
+request_terminate_timeout = 60
+slowlog = /proc/self/fd/2
+FPMEOF
 
         echo "Initializing finished"
 
