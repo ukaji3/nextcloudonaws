@@ -313,22 +313,6 @@ if ! [ -f "$NEXTCLOUD_DATA_DIR/skip.update" ]; then
             "$SOURCE_LOCATION/" \
             /var/www/html/
 
-        # Patch Redis.php: replace KEYS with SCAN for ElastiCache Serverless compatibility
-        if [ -f /var/www/html/lib/private/Memcache/Redis.php ] && [ -f /opt/redis-patch.php ]; then
-            cp /opt/redis-patch.php /var/www/html/lib/private/Memcache/Redis.php
-            echo "Patched Redis.php: KEYS replaced with SCAN"
-        fi
-        # Diagnostic page
-        [ -f /usr/src/nextcloud/diag.php ] && cp /usr/src/nextcloud/diag.php /var/www/html/diag.php
-        # PHP-FPM custom settings (clear_env + slowlog for debugging)
-        cat > /usr/local/etc/php-fpm.d/zzz-custom.conf << 'FPMEOF'
-[www]
-clear_env = no
-request_slowlog_timeout = 10
-request_terminate_timeout = 60
-slowlog = /proc/self/fd/2
-FPMEOF
-
         echo "Initializing finished"
 
         ################
@@ -648,6 +632,20 @@ if [ -z "$OBJECTSTORE_S3_BUCKET" ] && [ -z "$OBJECTSTORE_SWIFT_URL" ]; then
     fi
 
 fi
+
+# Apply patches and custom PHP-FPM config (always, regardless of version)
+if [ -f /var/www/html/lib/private/Memcache/Redis.php ] && [ -f /opt/redis-patch.php ]; then
+    cp /opt/redis-patch.php /var/www/html/lib/private/Memcache/Redis.php
+    echo "Patched Redis.php: KEYS replaced with SCAN"
+fi
+[ -f /usr/src/nextcloud/diag.php ] && cp /usr/src/nextcloud/diag.php /var/www/html/diag.php
+cat > /usr/local/etc/php-fpm.d/zzz-custom.conf << 'FPMEOF'
+[www]
+clear_env = no
+request_slowlog_timeout = 10
+request_terminate_timeout = 60
+slowlog = /proc/self/fd/2
+FPMEOF
 
 # Perform fingerprint update if instance was restored
 if [ -f "$NEXTCLOUD_DATA_DIR/fingerprint.update" ]; then
