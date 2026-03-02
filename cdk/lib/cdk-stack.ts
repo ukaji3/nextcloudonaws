@@ -409,6 +409,7 @@ def handler(event, context):
         REDIS_HOST: cache.attrEndpointAddress,
         REDIS_PORT: cache.attrEndpointPort,
         REDIS_TLS_ENABLED: 'true',
+        REDIS_MODE: 'rediscluster',
         NC_DOMAIN: domain,
         OVERWRITEPROTOCOL: 'https',
         APACHE_HOST: `nextcloud-aio-apache.nextcloud.local`,

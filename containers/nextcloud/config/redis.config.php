@@ -60,7 +60,7 @@ if (getenv('REDIS_MODE') !== 'rediscluster') {
   );
 
   if (getenv('REDIS_TLS_ENABLED') === 'true') {
-    $cluster_config['ssl'] = array('verify_peer' => true, 'verify_peer_name' => true);
+    $cluster_config['ssl_context'] = array('verify_peer' => true, 'verify_peer_name' => true);
   }
 
   if (getenv('REDIS_HOST_PASSWORD')) {
