@@ -462,6 +462,9 @@ EOF
             if [ "$NEXTCLOUD_LOG_TYPE" = "syslog" ]; then
                 php /var/www/html/occ config:system:set log_type --value="syslog"
                 php /var/www/html/occ config:system:delete logfile
+            elif [ "$NEXTCLOUD_LOG_TYPE" = "errorlog" ]; then
+                php /var/www/html/occ config:system:set log_type --value="errorlog"
+                php /var/www/html/occ config:system:delete logfile
             else
                 php /var/www/html/occ config:system:set log_type --value="file"
                 php /var/www/html/occ config:system:set logfile --value="/var/www/html/data/nextcloud.log"
@@ -673,6 +676,9 @@ echo "Adjusting log files..."
 php /var/www/html/occ config:system:set upgrade.cli-upgrade-link --value="https://github.com/nextcloud/all-in-one/discussions/2726"
 if [ "$NEXTCLOUD_LOG_TYPE" = "syslog" ]; then
     php /var/www/html/occ config:system:set log_type --value="syslog"
+    php /var/www/html/occ config:system:delete logfile
+elif [ "$NEXTCLOUD_LOG_TYPE" = "errorlog" ]; then
+    php /var/www/html/occ config:system:set log_type --value="errorlog"
     php /var/www/html/occ config:system:delete logfile
 else
     php /var/www/html/occ config:system:set logfile --value="/var/www/html/data/nextcloud.log"

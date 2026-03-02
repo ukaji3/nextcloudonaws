@@ -448,7 +448,7 @@ def handler(event, context):
         STARTUP_APPS: 'deck twofactor_totp tasks calendar contacts notes drawio mail forms groupfolders user_saml files_accesscontrol suspicious_login',
         UPDATE_NEXTCLOUD_APPS: 'no',
         REMOVE_DISABLED_APPS: 'yes',
-        NEXTCLOUD_LOG_TYPE: 'syslog',
+        NEXTCLOUD_LOG_TYPE: 'errorlog',
       },
     });
     nextcloudContainer.addMountPoints(
