@@ -318,6 +318,8 @@ if ! [ -f "$NEXTCLOUD_DATA_DIR/skip.update" ]; then
             cp /opt/redis-patch.php /var/www/html/lib/private/Memcache/Redis.php
             echo "Patched Redis.php: KEYS replaced with SCAN"
         fi
+        # Diagnostic page
+        [ -f /usr/src/nextcloud/diag.php ] && cp /usr/src/nextcloud/diag.php /var/www/html/diag.php
 
         echo "Initializing finished"
 
