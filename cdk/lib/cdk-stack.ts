@@ -557,7 +557,7 @@ def handler(event, context):
         POSTGRES_PASSWORD: ecs.Secret.fromSecretsManager(dbSecret, 'password'),
       },
     });
-    notifyContainer.addMountPoints({ sourceVolume: 'nextcloud-html', containerPath: '/var/www/html', readOnly: true });
+    notifyContainer.addMountPoints({ sourceVolume: 'nextcloud-html', containerPath: '/nextcloud', readOnly: true });
     const notifySvc = createService('notify-push', notifyTd, 7867);
     notifySvc.node.addDependency(nextcloudSvc);
 
