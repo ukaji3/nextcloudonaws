@@ -30,6 +30,7 @@ if (getenv('REDIS_MODE') !== 'rediscluster') {
   if (getenv('REDIS_TLS_ENABLED') === 'true') {
     $redis_config['host'] = 'tls://' . $redis_config['host'];
     $redis_config['ssl'] = array('verify_peer' => true, 'verify_peer_name' => true);
+    $redis_config['ssl_context'] = array('verify_peer' => true, 'verify_peer_name' => true);
   }
 
   $CONFIG['redis'] = $redis_config;
