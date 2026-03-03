@@ -639,6 +639,11 @@ if [ -f /var/www/html/lib/private/Memcache/Redis.php ] && [ -f /opt/redis-patch.
     echo "Patched Redis.php: KEYS replaced with SCAN"
 fi
 [ -f /usr/src/nextcloud/diag.php ] && cp /usr/src/nextcloud/diag.php /var/www/html/diag.php
+# Remove Redis session handler - ElastiCache Serverless is cluster-mode, PHP session.save_handler=redis is non-cluster
+rm -f /usr/local/etc/php/conf.d/redis-session.ini
+# Ensure redis.config.php exists on EFS (rsync in version_greater block may skip it)
+[ -f "$SOURCE_LOCATION/config/redis.config.php" ] && [ ! -f /var/www/html/config/redis.config.php ] && \
+    cp "$SOURCE_LOCATION/config/redis.config.php" /var/www/html/config/redis.config.php
 cat > /usr/local/etc/php-fpm.d/zzz-custom.conf << 'FPMEOF'
 [www]
 clear_env = no
@@ -754,15 +759,10 @@ else
 fi
 # AIO app end # Do not remove or change this line!
 
-# Notify push
-if ! [ -d "/var/www/html/custom_apps/notify_push" ]; then
-    php /var/www/html/occ app:install notify_push
-elif [ "$(php /var/www/html/occ config:app:get notify_push enabled)" != "yes" ]; then
-    php /var/www/html/occ app:enable notify_push
-elif [ "$SKIP_UPDATE" != 1 ]; then
-    php /var/www/html/occ app:update notify_push
+# Notify push - disabled (requires local Redis which is unavailable on ECS Fargate)
+if [ -d "/var/www/html/custom_apps/notify_push" ]; then
+    php /var/www/html/occ app:disable notify_push 2>/dev/null || true
 fi
-chmod 775 -R /var/www/html/custom_apps/notify_push/bin/
 php /var/www/html/occ config:system:set trusted_proxies 0 --value="127.0.0.1"
 php /var/www/html/occ config:system:set trusted_proxies 1 --value="::1"
 if [ -n "$ADDITIONAL_TRUSTED_PROXY" ]; then
