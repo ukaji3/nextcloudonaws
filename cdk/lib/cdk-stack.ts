@@ -283,6 +283,10 @@ export class NextcloudAioStack extends cdk.Stack {
       generateSecretString: { excludePunctuation: false, passwordLength: 24 },
     });
     adminSecret.grantRead(executionRole);
+    const onlyofficeSecret = new secretsmanager.Secret(this, 'OnlyofficeSecret', {
+      generateSecretString: { excludePunctuation: true, passwordLength: 32 },
+    });
+    onlyofficeSecret.grantRead(executionRole);
     if (imaginarySecret) imaginarySecret.grantRead(executionRole);
 
     // ========================================
@@ -399,6 +403,7 @@ def handler(event, context):
         ...(enableTalk && talkSecret ? { TURN_SECRET: ecs.Secret.fromSecretsManager(talkSecret) } : {}),
         ...(enableTalk && signalingSecret ? { SIGNALING_SECRET: ecs.Secret.fromSecretsManager(signalingSecret) } : {}),
         ...(enableImaginary && imaginarySecret ? { IMAGINARY_SECRET: ecs.Secret.fromSecretsManager(imaginarySecret) } : {}),
+        ONLYOFFICE_SECRET: ecs.Secret.fromSecretsManager(onlyofficeSecret),
       },
       environment: {
         POSTGRES_HOST: dbCluster.clusterEndpoint.hostname,
@@ -428,7 +433,6 @@ def handler(event, context):
         TZ: 'Asia/Tokyo',
         ONLYOFFICE_ENABLED: enableOnlyOffice ? 'yes' : 'no',
         ONLYOFFICE_HOST: 'nextcloud-aio-onlyoffice.nextcloud.local',
-        ONLYOFFICE_SECRET: 'changeme-onlyoffice-secret',
         TALK_ENABLED: enableTalk ? 'yes' : 'no',
         TALK_HOST: 'nextcloud-aio-talk.nextcloud.local',
         TALK_PORT: '3478',
@@ -598,8 +602,10 @@ def handler(event, context):
         environment: {
           JWT_ENABLED: 'true',
           JWT_HEADER: 'AuthorizationJwt',
-          JWT_SECRET: 'changeme-onlyoffice-secret',
           TZ: 'Asia/Tokyo',
+        },
+        secrets: {
+          JWT_SECRET: ecs.Secret.fromSecretsManager(onlyofficeSecret),
         },
       });
       ooContainer.addMountPoints({ sourceVolume: 'onlyoffice-data', containerPath: '/var/lib/onlyoffice', readOnly: false });
@@ -1208,7 +1214,7 @@ def handler(event, context):
     NagSuppressions.addResourceSuppressions(auditFn, [
       { id: 'AwsSolutions-IAM4', appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'], reason: 'Standard Lambda execution role managed policy' },
     ], true);
-    NagSuppressions.addResourceSuppressions([dbSecret, cacheSecret, adminSecret,
+    NagSuppressions.addResourceSuppressions([dbSecret, cacheSecret, adminSecret, onlyofficeSecret,
       ...(osSecret ? [osSecret] : []),
       ...(imaginarySecret ? [imaginarySecret] : []),
       ...(talkSecret ? [talkSecret] : []),
