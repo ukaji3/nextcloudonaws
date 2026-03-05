@@ -1064,6 +1064,9 @@ if [ "$FULLTEXTSEARCH_ENABLED" = 'yes' ]; then
             sed -i 's/buildCompatibilityHeaders/buildCompatibilityHeaders_DISABLED/g' "$ENDPOINT_TRAIT"
             echo "Patched EndpointTrait.php for OpenSearch compatibility"
         fi
+        # Patch: Fix highlight field name difference (Elasticsearch: max_analyzed_offset, OpenSearch: max_analyzer_offset)
+        find /var/www/html/custom_apps/fulltextsearch_elasticsearch/ -name '*.php' -exec \
+            sed -i 's/max_analyzed_offset/max_analyzer_offset/g' {} +
 
         # Do the index
         if ! [ -f "$NEXTCLOUD_DATA_DIR/fts-index.done" ]; then
