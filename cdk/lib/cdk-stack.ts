@@ -205,9 +205,9 @@ export class NextcloudAioStack extends cdk.Stack {
       generateSecretString: {
         secretStringTemplate: JSON.stringify({ username: 'admin' }),
         generateStringKey: 'password',
-        excludePunctuation: false,
+        excludeCharacters: '&<>"\'/\\@#%{}|^~`[]',
         includeSpace: false,
-        passwordLength: 16,
+        passwordLength: 32,
         requireEachIncludedType: true,
       },
     }) : undefined;
@@ -238,7 +238,7 @@ export class NextcloudAioStack extends cdk.Stack {
         securityGroups: [osSg],
         zoneAwareness: { enabled: true, availabilityZoneCount: 2 },
         capacity: {
-          dataNodeInstanceType: 't3.small.search',
+          dataNodeInstanceType: 't3.medium.search',
           dataNodes: 2,
           multiAzWithStandbyEnabled: false,
         },
@@ -453,6 +453,7 @@ def handler(event, context):
         UPDATE_NEXTCLOUD_APPS: 'no',
         REMOVE_DISABLED_APPS: 'yes',
         NEXTCLOUD_LOG_TYPE: 'errorlog',
+        DEPLOY_TS: new Date().toISOString(),
       },
     });
     nextcloudContainer.addMountPoints(

@@ -1052,6 +1052,19 @@ if [ "$FULLTEXTSEARCH_ENABLED" = 'yes' ]; then
         php /var/www/html/occ fulltextsearch_elasticsearch:configure "{\"elastic_host\":\"$FULLTEXTSEARCH_PROTOCOL://$FULLTEXTSEARCH_USER:$FULLTEXTSEARCH_PASSWORD@$FULLTEXTSEARCH_HOST:$FULLTEXTSEARCH_PORT\",\"elastic_index\":\"$FULLTEXTSEARCH_INDEX\"}"
         php /var/www/html/occ files_fulltextsearch:configure "{\"files_pdf\":true,\"files_office\":true}"
 
+        # Patch: Allow OpenSearch (which lacks X-Elastic-Product header) to work with the Elasticsearch PHP client
+        PRODUCT_CHECK="/var/www/html/custom_apps/fulltextsearch_elasticsearch/lib/Vendor/Elastic/Elasticsearch/Traits/ProductCheckTrait.php"
+        if [ -f "$PRODUCT_CHECK" ] && grep -q 'ProductCheckException' "$PRODUCT_CHECK"; then
+            sed -i 's/throw new ProductCheckException/return; \/\/ OpenSearch compat\n                throw new ProductCheckException/' "$PRODUCT_CHECK"
+            echo "Patched ProductCheckTrait.php for OpenSearch compatibility"
+        fi
+        # Patch: Disable Elasticsearch API compatibility headers (vnd.elasticsearch+json) unsupported by OpenSearch
+        ENDPOINT_TRAIT="/var/www/html/custom_apps/fulltextsearch_elasticsearch/lib/Vendor/Elastic/Elasticsearch/Traits/EndpointTrait.php"
+        if [ -f "$ENDPOINT_TRAIT" ] && grep -q 'buildCompatibilityHeaders' "$ENDPOINT_TRAIT" && ! grep -q 'buildCompatibilityHeaders_DISABLED' "$ENDPOINT_TRAIT"; then
+            sed -i 's/buildCompatibilityHeaders/buildCompatibilityHeaders_DISABLED/g' "$ENDPOINT_TRAIT"
+            echo "Patched EndpointTrait.php for OpenSearch compatibility"
+        fi
+
         # Do the index
         if ! [ -f "$NEXTCLOUD_DATA_DIR/fts-index.done" ]; then
             echo "Waiting 10 seconds before activating fulltextsearch..."
