@@ -1050,6 +1050,8 @@ if [ "$FULLTEXTSEARCH_ENABLED" = 'yes' ]; then
         fi
         php /var/www/html/occ fulltextsearch:configure '{"search_platform":"OCA\\FullTextSearch_Elasticsearch\\Platform\\ElasticSearchPlatform"}'
         php /var/www/html/occ fulltextsearch_elasticsearch:configure "{\"elastic_host\":\"$FULLTEXTSEARCH_PROTOCOL://$FULLTEXTSEARCH_USER:$FULLTEXTSEARCH_PASSWORD@$FULLTEXTSEARCH_HOST:$FULLTEXTSEARCH_PORT\",\"elastic_index\":\"$FULLTEXTSEARCH_INDEX\"}"
+        # Force elastic_host update (configure command may not overwrite existing value)
+        php /var/www/html/occ config:app:set fulltextsearch_elasticsearch elastic_host --value "$FULLTEXTSEARCH_PROTOCOL://$FULLTEXTSEARCH_USER:$FULLTEXTSEARCH_PASSWORD@$FULLTEXTSEARCH_HOST:$FULLTEXTSEARCH_PORT" --type string
         php /var/www/html/occ files_fulltextsearch:configure "{\"files_pdf\":true,\"files_office\":true}"
 
         # Patch: Allow OpenSearch (which lacks X-Elastic-Product header) to work with the Elasticsearch PHP client
