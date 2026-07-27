@@ -19,15 +19,31 @@ import * as appscaling from 'aws-cdk-lib/aws-applicationautoscaling';
 
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
-import * as codebuild from 'aws-cdk-lib/aws-codebuild';
-import * as codepipeline from 'aws-cdk-lib/aws-codepipeline';
-import * as codepipeline_actions from 'aws-cdk-lib/aws-codepipeline-actions';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs_destinations from 'aws-cdk-lib/aws-logs-destinations';
 import { NagSuppressions } from 'cdk-nag';
+
+/**
+ * 通常運用時の各 ECS サービスの desired count。
+ * サービス定義とアップグレード State Machine のロールバックで共有し、値の乖離を防ぐ。
+ */
+interface ServiceBaselineCounts {
+  readonly nextcloud: number;
+  readonly apache: number;
+  readonly notifyPush: number;
+}
+
+/**
+ * アップグレード State Machine の1ステップ（実行タスク + ExitCode 検査）のチェーン端点。
+ */
+interface UpgradeStepChain {
+  readonly entry: sfn.IChainable;
+  readonly exit: sfn.INextable;
+}
 
 export class NextcloudAioStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -51,9 +67,6 @@ export class NextcloudAioStack extends cdk.Stack {
     const enableClamav = this.node.tryGetContext('enableClamav') === 'true';
     const auroraMinAcu = this.node.tryGetContext('auroraMinAcu') || 0.5;
     const auroraMaxAcu = this.node.tryGetContext('auroraMaxAcu') || 16;
-    const githubOwner = this.node.tryGetContext('githubOwner') || 'ukaji3';
-    const githubRepo = this.node.tryGetContext('githubRepo') || 'nextcloud-all-in-one';
-    const githubBranch = this.node.tryGetContext('githubBranch') || 'main';
 
     // ========================================
     // 1. VPC
@@ -134,7 +147,9 @@ export class NextcloudAioStack extends cdk.Stack {
 
     const dbCluster = new rds.DatabaseCluster(this, 'AuroraCluster', {
       engine: rds.DatabaseClusterEngine.auroraPostgres({
-        version: rds.AuroraPostgresEngineVersion.VER_16_4,
+        // 16.4 は deprecated（新規作成不可）。稼働クラスタは自動マイナー
+        // アップグレードで 16.11 のため、テンプレートを実機に一致させる。
+        version: rds.AuroraPostgresEngineVersion.VER_16_11,
       }),
       credentials: rds.Credentials.fromSecret(dbSecret),
       defaultDatabaseName: 'nextcloud_database',
@@ -453,7 +468,9 @@ def handler(event, context):
         UPDATE_NEXTCLOUD_APPS: 'no',
         REMOVE_DISABLED_APPS: 'yes',
         NEXTCLOUD_LOG_TYPE: 'errorlog',
-        DEPLOY_TS: new Date().toISOString(),
+        // NOTE: 意図的にデプロイ時刻等の非決定値を含めない。
+        // 非決定値があると synth のたびにタスク定義が置換され、
+        // cdk diff が常に差分を示して冪等性が失われる。
       },
     });
     nextcloudContainer.addMountPoints(
@@ -461,7 +478,10 @@ def handler(event, context):
       { sourceVolume: 'nextcloud-data', containerPath: '/mnt/ncdata', readOnly: false },
     );
 
-    const nextcloudSvc = createService('nextcloud', nextcloudTd, 9000, { desiredCount: 1, minCapacity: 1, maxCapacity: 10 });
+    // 通常運用時の desired count（アップグレード SFN のロールバックと共有）
+    const serviceBaseline: ServiceBaselineCounts = { nextcloud: 1, apache: 2, notifyPush: 1 };
+
+    const nextcloudSvc = createService('nextcloud', nextcloudTd, 9000, { desiredCount: serviceBaseline.nextcloud, minCapacity: 1, maxCapacity: 10 });
 
     // ========================================
     // 12. Apache Task Definition
@@ -520,7 +540,7 @@ def handler(event, context):
       { sourceVolume: 'apache-data', containerPath: '/mnt/data', readOnly: false },
     );
 
-    const apacheSvc = createService('apache', apacheTd, apachePort, { desiredCount: 2, minCapacity: 2, maxCapacity: 5 });
+    const apacheSvc = createService('apache', apacheTd, apachePort, { desiredCount: serviceBaseline.apache, minCapacity: 2, maxCapacity: 5 });
     apacheSvc.node.addDependency(nextcloudSvc);
 
     // ========================================
@@ -565,7 +585,7 @@ def handler(event, context):
       },
     });
     notifyContainer.addMountPoints({ sourceVolume: 'nextcloud-html', containerPath: '/nextcloud', readOnly: true });
-    const notifySvc = createService('notify-push', notifyTd, 7867);
+    const notifySvc = createService('notify-push', notifyTd, 7867, { desiredCount: serviceBaseline.notifyPush });
     notifySvc.node.addDependency(nextcloudSvc);
 
     // ========================================
@@ -744,7 +764,7 @@ def handler(event, context):
       : { port: 80, protocol: elbv2.ApplicationProtocol.HTTP };
     const listener = alb.addListener('Listener', listenerProps);
 
-    listener.addTargets('ApacheTarget', {
+    const apacheTargetGroup = listener.addTargets('ApacheTarget', {
       port: apachePort,
       protocol: elbv2.ApplicationProtocol.HTTP,
       targets: [apacheSvc],
@@ -761,14 +781,26 @@ def handler(event, context):
 
     // ========================================
     // 16. Upgrade State Machine (Step Functions)
+    //
+    // 2フェーズ・waitForTaskToken 方式:
+    //   Phase 1（準備）: maintenance ON → Web系サービス縮退(0) → Aurora スナップショット
+    //                    → config.php バックアップ
+    //   ---- SQS でタスクトークンを配送し、operator が cdk deploy（新イメージ）を実施 ----
+    //   Phase 2（検証・復帰）: occ status 検証 → maintenance OFF → 完了
+    //
+    // 設計上の要点:
+    //   - ECS サービスは CloudFormation 生成の実サービス名を CFN 参照で指定する
+    //     （Cloud Map のサービスディスカバリ名では UpdateService は解決できない）
+    //   - occ は one-off Fargate タスク（nextcloudTd 流用）で RUN_JOB 実行し、
+    //     ExitCode==0 を明示検査する（runTask の fire-and-forget を排除）
+    //   - 縮退により、EFS 上のコードを rsync する upgrade 中に旧タスクが
+    //     混在バージョンのコードを実行することを防ぐ
+    //   - 失敗時のロールバックは desired count 復元のみのベストエフォート。
+    //     データ復旧の正典は Aurora スナップショットと S3 上の config.php
     // ========================================
     const sfnRole = new iam.Role(this, 'SfnRole', {
       assumedBy: new iam.ServicePrincipal('states.amazonaws.com'),
     });
-    sfnRole.addToPolicy(new iam.PolicyStatement({
-      actions: ['ecs:RunTask', 'ecs:DescribeTasks', 'ecs:UpdateService', 'ecs:DescribeServices'],
-      resources: ['*'],
-    }));
     sfnRole.addToPolicy(new iam.PolicyStatement({
       actions: ['iam:PassRole'],
       resources: [taskRole.roleArn, executionRole.roleArn],
@@ -778,35 +810,46 @@ def handler(event, context):
       resources: [dbCluster.clusterArn, `arn:aws:rds:${this.region}:${this.account}:cluster-snapshot:*`],
     }));
 
-    const privateSubnets = vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS });
-    const networkConfig = {
-      AwsvpcConfiguration: {
-        Subnets: privateSubnets.subnetIds,
-        SecurityGroups: [ecsSg.securityGroupId],
-        AssignPublicIp: 'DISABLED',
-      },
-    };
-
-    // Helper: run one-off ECS task with command override
-    const runOccCommand = (id: string, command: string[]) =>
-      new tasks.CallAwsService(this, id, {
-        service: 'ecs',
-        action: 'runTask',
-        parameters: {
-          Cluster: cluster.clusterArn,
-          TaskDefinition: nextcloudTd.taskDefinitionArn,
-          LaunchType: 'FARGATE',
-          NetworkConfiguration: networkConfig,
-          Overrides: {
-            ContainerOverrides: [{ Name: 'nextcloud', Command: command }],
-          },
-        },
-        iamResources: ['*'],
+    /**
+     * occ コマンド等を one-off Fargate タスクとして同期実行するステップを生成する。
+     *
+     * RUN_JOB（runTask.sync）でタスク停止まで待機し、さらに Containers[0].ExitCode==0 を
+     * Choice で明示検査する。occ は config.php の所有者 (www-data) で実行する必要が
+     * あるため、呼び出し側は sudo -E -u www-data を付与すること。
+     * タスク定義はファミリー最新 ACTIVE リビジョンを起動するため、deploy 後の
+     * ステップは新イメージで実行される。
+     */
+    const createOccStep = (id: string, command: string[]): UpgradeStepChain => {
+      const run = new tasks.EcsRunTask(this, id, {
+        integrationPattern: sfn.IntegrationPattern.RUN_JOB,
+        cluster,
+        taskDefinition: nextcloudTd,
+        launchTarget: new tasks.EcsFargateLaunchTarget(),
+        subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        securityGroups: [ecsSg],
+        assignPublicIp: false,
+        containerOverrides: [{ containerDefinition: nextcloudContainer, command }],
+        taskTimeout: sfn.Timeout.duration(cdk.Duration.minutes(30)),
         resultPath: `$.${id}Result`,
       });
+      const ok = new sfn.Pass(this, `${id}Ok`);
+      const failed = new sfn.Fail(this, `${id}Failed`, {
+        error: `${id}NonZeroExit`,
+        cause: `${id}: one-off task container exited with non-zero code`,
+      });
+      run.next(
+        new sfn.Choice(this, `${id}ExitCheck`)
+          .when(sfn.Condition.numberEquals(`$.${id}Result.Containers[0].ExitCode`, 0), ok)
+          .otherwise(failed),
+      );
+      return { entry: run, exit: ok };
+    };
 
-    // Helper: update service desired count
-    const scaleService = (id: string, serviceName: string, count: number) =>
+    /**
+     * ECS サービスの desired count を変更するステップを生成する。
+     * serviceName には CFN が生成した実サービス名（svc.serviceName）を渡すこと。
+     */
+    const scaleService = (id: string, serviceName: string, count: number): tasks.CallAwsService =>
       new tasks.CallAwsService(this, id, {
         service: 'ecs',
         action: 'updateService',
@@ -819,25 +862,47 @@ def handler(event, context):
         resultPath: sfn.JsonPath.DISCARD,
       });
 
-    // Step 1: Maintenance mode ON
-    const maintenanceOn = runOccCommand('MaintenanceOn', ['php', '/var/www/html/occ', 'maintenance:mode', '--on']);
+    // Step 0: 実行IDの抽出（スナップショット名に使用）
+    const extractId = new sfn.Pass(this, 'ExtractExecutionId', {
+      parameters: { 'executionId.$': '$$.Execution.Name' },
+    });
 
-    // Step 2: Wait for in-flight requests to drain
-    const waitDrain = new sfn.Wait(this, 'WaitDrain', { time: sfn.WaitTime.duration(cdk.Duration.seconds(30)) });
+    // Step 1: メンテナンスモード ON
+    const maintenanceOn = createOccStep('MaintenanceOn',
+      ['sudo', '-E', '-u', 'www-data', 'php', '/var/www/html/occ', 'maintenance:mode', '--on']);
 
-    // Step 3: Scale down all services to 0
-    const scaleDownNextcloud = scaleService('ScaleDownNextcloud', `nextcloud-aio-nextcloud`, 0);
-    const scaleDownApache = scaleService('ScaleDownApache', `nextcloud-aio-apache`, 0);
-    const scaleDownNotify = scaleService('ScaleDownNotify', `nextcloud-aio-notify-push`, 0);
+    // Step 2: Web系サービスを 0 に縮退
     const scaleDownAll = new sfn.Parallel(this, 'ScaleDownAll', { resultPath: sfn.JsonPath.DISCARD })
-      .branch(scaleDownNextcloud)
-      .branch(scaleDownApache)
-      .branch(scaleDownNotify);
+      .branch(scaleService('ScaleDownNextcloud', nextcloudSvc.serviceName, 0))
+      .branch(scaleService('ScaleDownApache', apacheSvc.serviceName, 0))
+      .branch(scaleService('ScaleDownNotify', notifySvc.serviceName, 0));
 
-    // Step 4: Wait for all tasks to stop
-    const waitScaleDown = new sfn.Wait(this, 'WaitScaleDown', { time: sfn.WaitTime.duration(cdk.Duration.seconds(60)) });
+    // Step 3: 全タスク停止をポーリングで確認（固定待機は使わない）
+    const describeAfterScaleDown = new tasks.CallAwsService(this, 'DescribeAfterScaleDown', {
+      service: 'ecs',
+      action: 'describeServices',
+      parameters: {
+        Cluster: cluster.clusterArn,
+        Services: [nextcloudSvc.serviceName, apacheSvc.serviceName, notifySvc.serviceName],
+      },
+      iamResources: ['*'],
+      resultPath: '$.scaleDownStatus',
+    });
+    const waitTasksStopping = new sfn.Wait(this, 'WaitTasksStopping', {
+      time: sfn.WaitTime.duration(cdk.Duration.seconds(15)),
+    });
+    const tasksStoppedOk = new sfn.Pass(this, 'AllTasksStopped');
+    const checkTasksStopped = new sfn.Choice(this, 'CheckTasksStopped')
+      .when(sfn.Condition.and(
+        sfn.Condition.numberEquals('$.scaleDownStatus.Services[0].RunningCount', 0),
+        sfn.Condition.numberEquals('$.scaleDownStatus.Services[1].RunningCount', 0),
+        sfn.Condition.numberEquals('$.scaleDownStatus.Services[2].RunningCount', 0),
+      ), tasksStoppedOk)
+      .otherwise(waitTasksStopping);
+    waitTasksStopping.next(describeAfterScaleDown);
+    describeAfterScaleDown.next(checkTasksStopped);
 
-    // Step 5: Aurora snapshot
+    // Step 4: Aurora スナップショット取得 → available をポーリング
     const createSnapshot = new tasks.CallAwsService(this, 'CreateSnapshot', {
       service: 'rds',
       action: 'createDBClusterSnapshot',
@@ -846,88 +911,155 @@ def handler(event, context):
         'DbClusterSnapshotIdentifier.$': "States.Format('pre-upgrade-{}', $.executionId)",
       },
       iamResources: ['*'],
-      resultPath: '$.snapshotResult',
+      resultPath: sfn.JsonPath.DISCARD,
     });
-
-    // Step 6: Backup config.php to S3
-    const backupConfig = runOccCommand('BackupConfig', [
-      'sh', '-c',
-      `aws s3 cp /var/www/html/config/config.php s3://${bucket.bucketName}/backups/config.php.$(date +%Y%m%d%H%M%S)`,
-    ]);
-
-    // Step 7: Start Nextcloud with 1 task (new image triggers upgrade)
-    const scaleUpNextcloudOne = scaleService('ScaleUpNextcloudOne', `nextcloud-aio-nextcloud`, 1);
-
-    // Step 8: Wait for upgrade to complete (health check pass)
-    const waitUpgrade = new sfn.Wait(this, 'WaitUpgrade', { time: sfn.WaitTime.duration(cdk.Duration.seconds(180)) });
-
-    // Step 9: Check service health
-    const checkHealth = new tasks.CallAwsService(this, 'CheckHealth', {
-      service: 'ecs',
-      action: 'describeServices',
+    const describeSnapshot = new tasks.CallAwsService(this, 'DescribeSnapshot', {
+      service: 'rds',
+      action: 'describeDBClusterSnapshots',
       parameters: {
-        Cluster: cluster.clusterArn,
-        Services: [`nextcloud-aio-nextcloud`],
+        'DbClusterSnapshotIdentifier.$': "States.Format('pre-upgrade-{}', $.executionId)",
       },
       iamResources: ['*'],
-      resultPath: '$.healthResult',
+      resultPath: '$.snapshotStatus',
+    });
+    const waitSnapshot = new sfn.Wait(this, 'WaitSnapshotAvailable', {
+      time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
+    });
+    const snapshotOk = new sfn.Pass(this, 'SnapshotAvailable');
+    const checkSnapshot = new sfn.Choice(this, 'CheckSnapshotStatus')
+      .when(sfn.Condition.stringEquals('$.snapshotStatus.DbClusterSnapshots[0].Status', 'available'), snapshotOk)
+      .otherwise(waitSnapshot);
+    waitSnapshot.next(describeSnapshot);
+    describeSnapshot.next(checkSnapshot);
+
+    // Step 5: config.php をバックアップ
+    // このステップは deploy 前＝旧イメージの one-off タスクで実行されるため、
+    // 旧イメージに aws-cli が無くても成立するよう EFS(/mnt/ncdata) への cp を必須とし、
+    // aws-cli が存在する場合のみ S3 へもコピーする（初回アップグレードのブートストラップ対策）。
+    const backupConfig = createOccStep('BackupConfig', [
+      'sh', '-c',
+      [
+        'set -e',
+        'TS=$(date +%Y%m%d%H%M%S)',
+        'cp /var/www/html/config/config.php "/mnt/ncdata/config.php.backup.$TS"',
+        'if command -v aws >/dev/null 2>&1; then',
+        `  aws s3 cp "/mnt/ncdata/config.php.backup.$TS" "s3://${bucket.bucketName}/backups/config.php.$TS"`,
+        'else',
+        '  echo "aws-cli not present in this image; EFS backup only"',
+        'fi',
+      ].join('\n'),
+    ]);
+
+    // Step 6: SQS にタスクトークンを配送し、operator の cdk deploy 完了を待つ
+    const upgradeDlq = new sqs.Queue(this, 'UpgradeApprovalDlq', {
+      enforceSSL: true,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      retentionPeriod: cdk.Duration.days(14),
+    });
+    NagSuppressions.addResourceSuppressions(upgradeDlq, [
+      { id: 'AwsSolutions-SQS3', reason: 'This queue is itself the dead-letter queue for the upgrade approval queue.' },
+    ]);
+    const upgradeQueue = new sqs.Queue(this, 'UpgradeApprovalQueue', {
+      enforceSSL: true,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      retentionPeriod: cdk.Duration.days(4),
+      visibilityTimeout: cdk.Duration.minutes(5),
+      deadLetterQueue: { queue: upgradeDlq, maxReceiveCount: 10 },
+    });
+    const waitForDeploy = new tasks.SqsSendMessage(this, 'WaitForDeploy', {
+      queue: upgradeQueue,
+      integrationPattern: sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
+      messageBody: sfn.TaskInput.fromObject({
+        action: 'NEXTCLOUD_UPGRADE_READY',
+        executionId: sfn.JsonPath.stringAt('$.executionId'),
+        taskToken: sfn.JsonPath.taskToken,
+        instruction: [
+          '1) cdk.json の nextcloudImageUri を新イメージに更新',
+          '2) npx cdk deploy NextcloudAioStack',
+          '3) aws stepfunctions send-task-success --task-token <taskToken> --task-output {}',
+          '中止する場合: aws stepfunctions send-task-failure --task-token <taskToken>',
+        ].join(' / '),
+      }),
+      taskTimeout: sfn.Timeout.duration(cdk.Duration.hours(3)),
+      resultPath: sfn.JsonPath.DISCARD,
     });
 
-    const isHealthy = new sfn.Choice(this, 'IsHealthy')
-      .when(
-        sfn.Condition.numberGreaterThanEquals('$.healthResult.Services[0].Deployments[0].RunningCount', 1),
-        new sfn.Pass(this, 'HealthCheckPassed'),
-      )
-      .otherwise(
-        new sfn.Wait(this, 'WaitRetryHealth', { time: sfn.WaitTime.duration(cdk.Duration.seconds(60)) })
-          .next(checkHealth),
-      );
+    // Step 7: 基準 desired count へ復元
+    // cdk deploy はタスク定義が変わったサービスしか更新しないため（CFN は無変更リソースを
+    // 更新しない）、SFN が下げた desired の復元は成功パスで明示的に行う必要がある。
+    const restoreBaseline = new sfn.Parallel(this, 'RestoreBaseline', { resultPath: sfn.JsonPath.DISCARD })
+      .branch(scaleService('RestoreNextcloud', nextcloudSvc.serviceName, serviceBaseline.nextcloud))
+      .branch(scaleService('RestoreApache', apacheSvc.serviceName, serviceBaseline.apache))
+      .branch(scaleService('RestoreNotify', notifySvc.serviceName, serviceBaseline.notifyPush));
 
-    // Step 10: Scale up all services
-    const scaleUpNextcloud = scaleService('ScaleUpNextcloud', `nextcloud-aio-nextcloud`, 2);
-    const scaleUpApache = scaleService('ScaleUpApache', `nextcloud-aio-apache`, 2);
-    const scaleUpNotify = scaleService('ScaleUpNotify', `nextcloud-aio-notify-push`, 1);
-    const scaleUpAll = new sfn.Parallel(this, 'ScaleUpAll', { resultPath: sfn.JsonPath.DISCARD })
-      .branch(scaleUpNextcloud)
-      .branch(scaleUpApache)
-      .branch(scaleUpNotify);
+    // Step 8: ALB ターゲット健全化をポーリング
+    // ターゲットのヘルスチェックは /status.php を経由するため、healthy 到達は
+    // apache→nextcloud の疎通とアップグレード完了（maintenance 解除）の実証になる。
+    // この後の occ 検証はイメージと EFS のバージョンが一致した状態で走るため、
+    // one-off タスクの entrypoint が二重アップグレードに突入しない。
+    const describeTargetHealth = new tasks.CallAwsService(this, 'DescribeTargetHealth', {
+      service: 'elasticloadbalancingv2',
+      action: 'describeTargetHealth',
+      parameters: { TargetGroupArn: apacheTargetGroup.targetGroupArn },
+      iamAction: 'elasticloadbalancing:DescribeTargetHealth',
+      iamResources: ['*'],
+      resultPath: '$.tgHealth',
+    });
+    const waitTgHealthy = new sfn.Wait(this, 'WaitTargetsHealthy', {
+      time: sfn.WaitTime.duration(cdk.Duration.seconds(20)),
+    });
+    const tgHealthyOk = new sfn.Pass(this, 'TargetsHealthy');
+    const checkTgHealthy = new sfn.Choice(this, 'CheckTargetsHealthy')
+      .when(sfn.Condition.and(
+        sfn.Condition.isPresent('$.tgHealth.TargetHealthDescriptions[0].TargetHealth.State'),
+        sfn.Condition.stringEquals('$.tgHealth.TargetHealthDescriptions[0].TargetHealth.State', 'healthy'),
+      ), tgHealthyOk)
+      .otherwise(waitTgHealthy);
+    waitTgHealthy.next(describeTargetHealth);
+    describeTargetHealth.next(checkTgHealthy);
 
-    const upgradeSuccess = new sfn.Succeed(this, 'UpgradeSuccess');
+    // Step 9: アップグレード検証（この時点でバージョン一致のため occ status は短時間で完了する）
+    const verifyUpgrade = createOccStep('VerifyUpgrade',
+      ['sudo', '-E', '-u', 'www-data', 'php', '/var/www/html/occ', 'status']);
 
-    // Rollback on failure
+    // Step 10: メンテナンス OFF（entrypoint.sh が既に OFF にしていても冪等）
+    const maintenanceOffFinal = createOccStep('MaintenanceOffFinal',
+      ['sudo', '-E', '-u', 'www-data', 'php', '/var/www/html/occ', 'maintenance:mode', '--off']);
+
+    const upgradeSucceeded = new sfn.Succeed(this, 'UpgradeSucceeded');
+
+    // --- メインチェーン結線 ---
+    maintenanceOn.exit.next(scaleDownAll);
+    scaleDownAll.next(describeAfterScaleDown);
+    tasksStoppedOk.next(createSnapshot);
+    createSnapshot.next(describeSnapshot);
+    snapshotOk.next(backupConfig.entry);
+    backupConfig.exit.next(waitForDeploy);
+    waitForDeploy.next(restoreBaseline);
+    restoreBaseline.next(describeTargetHealth);
+    tgHealthyOk.next(verifyUpgrade.entry);
+    verifyUpgrade.exit.next(maintenanceOffFinal.entry);
+    maintenanceOffFinal.exit.next(upgradeSucceeded);
+
+    // --- ロールバック（ベストエフォート）---
+    // 新イメージ deploy 後の失敗では EFS 上のコードは新版に置換済みのため、
+    // desired 復元では旧版に戻らない。DB は pre-upgrade スナップショットから復旧する。
     const rollbackScaleUp = new sfn.Parallel(this, 'RollbackScaleUp', { resultPath: sfn.JsonPath.DISCARD })
-      .branch(scaleService('RollbackNextcloud', `nextcloud-aio-nextcloud`, 2))
-      .branch(scaleService('RollbackApache', `nextcloud-aio-apache`, 2))
-      .branch(scaleService('RollbackNotify', `nextcloud-aio-notify-push`, 1));
-    const maintenanceOff = runOccCommand('MaintenanceOff', ['php', '/var/www/html/occ', 'maintenance:mode', '--off']);
-    const rollback = rollbackScaleUp.next(maintenanceOff).next(new sfn.Fail(this, 'UpgradeFailed', {
-      cause: 'Upgrade failed. Services rolled back to previous state.',
-    }));
-
-    // Chain
-    const definition = maintenanceOn
-      .next(waitDrain)
-      .next(scaleDownAll)
-      .next(waitScaleDown)
-      .next(createSnapshot)
-      .next(backupConfig)
-      .next(scaleUpNextcloudOne)
-      .next(waitUpgrade)
-      .next(checkHealth)
-      .next(isHealthy);
-
-    // Connect success path
-    isHealthy.afterwards().next(scaleUpAll).next(upgradeSuccess);
-
-    // Add catch for rollback
-    const mainChain = new sfn.Parallel(this, 'MainChain', { resultPath: sfn.JsonPath.DISCARD });
-    mainChain.branch(definition);
-    mainChain.addCatch(rollback, { resultPath: '$.error' });
-
-    // Prepend executionId extraction
-    const extractId = new sfn.Pass(this, 'ExtractExecutionId', {
-      parameters: { 'executionId.$': "$$.Execution.Name" },
+      .branch(scaleService('RollbackNextcloud', nextcloudSvc.serviceName, serviceBaseline.nextcloud))
+      .branch(scaleService('RollbackApache', apacheSvc.serviceName, serviceBaseline.apache))
+      .branch(scaleService('RollbackNotify', notifySvc.serviceName, serviceBaseline.notifyPush));
+    const maintenanceOffRollback = createOccStep('MaintenanceOffRollback',
+      ['sudo', '-E', '-u', 'www-data', 'php', '/var/www/html/occ', 'maintenance:mode', '--off']);
+    const upgradeFailed = new sfn.Fail(this, 'UpgradeFailed', {
+      cause: 'Upgrade failed. Desired counts restored (best effort). Recover DB from the pre-upgrade snapshot if needed.',
     });
+    rollbackScaleUp.next(maintenanceOffRollback.entry);
+    maintenanceOffRollback.exit.next(upgradeFailed);
+
+    // Parallel でラップして一括 catch
+    const mainChain = new sfn.Parallel(this, 'MainChain', { resultPath: sfn.JsonPath.DISCARD });
+    mainChain.branch(maintenanceOn.entry);
+    mainChain.addCatch(rollbackScaleUp, { resultPath: '$.error' });
 
     const sfnLogGroup = new logs.LogGroup(this, 'SfnLogs', {
       retention: logs.RetentionDays.ONE_MONTH,
@@ -936,12 +1068,14 @@ def handler(event, context):
 
     const stateMachine = new sfn.StateMachine(this, 'UpgradeStateMachine', {
       definitionBody: sfn.DefinitionBody.fromChainable(extractId.next(mainChain)),
-      timeout: cdk.Duration.hours(2),
+      timeout: cdk.Duration.hours(6),
       role: sfnRole,
       stateMachineName: 'nextcloud-upgrade',
       tracingEnabled: true,
       logs: { destination: sfnLogGroup, level: sfn.LogLevel.ALL },
     });
+
+    new cdk.CfnOutput(this, 'UpgradeQueueUrl', { value: upgradeQueue.queueUrl });
 
     // ========================================
     // 17. CI/CD Pipeline - SKIPPED (requires github-token in Secrets Manager)

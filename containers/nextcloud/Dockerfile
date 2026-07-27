@@ -8,7 +8,7 @@ ENV SOURCE_LOCATION=/usr/src/nextcloud
 ENV REDIS_DB_INDEX=0
 
 # AIO settings start # Do not remove or change this line!
-ENV NEXTCLOUD_VERSION=32.0.6
+ENV NEXTCLOUD_VERSION=32.0.13
 # AIO settings end # Do not remove or change this line!
 
 COPY --chmod=775 containers/nextcloud/*.sh /
@@ -217,6 +217,7 @@ RUN set -ex; \
     chmod 777 -R /var/run/supervisord; \
     \
     apk add --no-cache \
+        aws-cli \
         bash \
         netcat-openbsd \
         openssl \

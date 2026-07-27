@@ -23,7 +23,7 @@ Nextcloud を AWS ECS Fargate 上にデプロイするためのプロジェク�
 - **コスト最適化**: S3 Intelligent-Tiering、OpenSearch Service プロビジョンド
 - **運用監視**: CloudWatch Alarms (11件)、Dashboard、ログメトリクスフィルター、Aurora Performance Insights
 - **セキュリティ**: CDK Nag (AwsSolutions) 準拠、VPC Flow Log、ALB/S3 アクセスログ
-- **CI/CD**: CodePipeline + CodeBuild → Step Functions による自動アップグレード
+- **アップグレード自動化**: Step Functions によるローリングアップグレード（手動起動。CodePipeline による CI/CD は未実装）
 
 ## ディレクトリ構成
 
@@ -37,7 +37,7 @@ docs/                    デプロイメントガイド
 
 | ファイル | 変更内容 |
 |---|---|
-| `containers/nextcloud/Dockerfile` | `app/` 依存除去、COPY パス変更、AIO_TOKEN/AIO_URL 削除 |
+| `containers/nextcloud/Dockerfile` | `app/` 依存除去、COPY パス変更、AIO_TOKEN/AIO_URL 削除、aws-cli 追加（アップグレード SFN の config.php バックアップ用） |
 | `containers/nextcloud/config/redis.config.php` | ElastiCache Serverless 用 TLS 対応追加 |
 | `containers/nextcloud/entrypoint.sh` | syslog ログ出力対応 (NEXTCLOUD_LOG_TYPE) |
 
@@ -66,13 +66,37 @@ npx cdk deploy
 
 ## バージョンアップ
 
-CodePipeline (`nextcloud-deploy`) を実行すると自動で:
-1. Docker イメージのビルド & ECR プッシュ
-2. Step Functions によるローリングアップグレード（メンテナンスモード → バックアップ → アップグレード → スケールアップ）
+Step Functions ステートマシン `nextcloud-upgrade` がメンテナンスモード・サービス縮退・Aurora スナップショット・config.php バックアップを自動化する。イメージの反映（`cdk deploy`）のみ operator が実施し、タスクトークンで再開する2フェーズ方式。
+
+1. Docker イメージをビルドして ECR にプッシュする
 
 ```bash
-aws codepipeline start-pipeline-execution --name nextcloud-deploy
+aws ecr get-login-password --region <region> | docker login --username AWS --password-stdin <account>.dkr.ecr.<region>.amazonaws.com
+docker build -t <account>.dkr.ecr.<region>.amazonaws.com/aio-nextcloud:<tag> -f containers/nextcloud/Dockerfile .
+docker push <account>.dkr.ecr.<region>.amazonaws.com/aio-nextcloud:<tag>
 ```
+
+2. ステートマシンを起動する（maintenance ON → サービス縮退 → スナップショット → バックアップ後、SQS でトークンを配送して待機する）
+
+```bash
+aws stepfunctions start-execution --state-machine-arn arn:aws:states:<region>:<account>:stateMachine:nextcloud-upgrade
+```
+
+3. SQS キュー（スタック出力 `UpgradeQueueUrl`）からタスクトークンを取得する
+
+```bash
+aws sqs receive-message --queue-url <UpgradeQueueUrl> --wait-time-seconds 20
+```
+
+4. `cdk.json` の `nextcloudImageUri` を新しいタグに更新し `npx cdk deploy` する（旧タスクは停止済みのため、新イメージの entrypoint が安全に `occ upgrade` を実行する）
+
+5. deploy 完了後、トークンで実行を再開する（検証 → maintenance OFF → 完了）
+
+```bash
+aws stepfunctions send-task-success --task-token '<taskToken>' --task-output '{}'
+```
+
+失敗時はステートマシンが desired count を復元する（ベストエフォート）。DB の復旧はスナップショット `pre-upgrade-<executionId>` から行う。
 
 ## upstream の更新追従
 
