@@ -466,7 +466,8 @@ def handler(event, context):
         WHITEBOARD_ENABLED: 'no',
         STARTUP_APPS: 'deck twofactor_totp tasks calendar contacts notes drawio mail forms groupfolders user_saml files_accesscontrol suspicious_login',
         UPDATE_NEXTCLOUD_APPS: 'no',
-        REMOVE_DISABLED_APPS: 'yes',
+        // メジャーアップグレード時に未対応アプリが「無効化」に留まり「削除」されないようにする
+        REMOVE_DISABLED_APPS: 'no',
         NEXTCLOUD_LOG_TYPE: 'errorlog',
         // NOTE: 意図的にデプロイ時刻等の非決定値を含めない。
         // 非決定値があると synth のたびにタスク定義が置換され、

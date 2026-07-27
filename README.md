@@ -37,9 +37,12 @@ docs/                    デプロイメントガイド
 
 | ファイル | 変更内容 |
 |---|---|
-| `containers/nextcloud/Dockerfile` | `app/` 依存除去、COPY パス変更、AIO_TOKEN/AIO_URL 削除、aws-cli 追加（アップグレード SFN の config.php バックアップ用） |
-| `containers/nextcloud/config/redis.config.php` | ElastiCache Serverless 用 TLS 対応追加 |
-| `containers/nextcloud/entrypoint.sh` | syslog ログ出力対応 (NEXTCLOUD_LOG_TYPE) |
+| `containers/nextcloud/Dockerfile` | `app/` 依存除去、COPY パス変更、AIO_TOKEN/AIO_URL 削除、aws-cli 追加（アップグレード SFN の config.php バックアップ用）、`AIO_LOG_LEVEL` デフォルト定義、redis-patch.php/diag.php の COPY |
+| `containers/nextcloud/config/redis.config.php` | ElastiCache Serverless 用に全面書き換え（`REDIS_TLS_ENABLED` による TLS 接続、クラスタモード設定） |
+| `containers/nextcloud/entrypoint.sh` | rsync に `--inplace` 付与（EFS 対応）、末尾に AWS 固有ブロック（redis-patch 適用・diag.php 配置・redis セッションハンドラ除去・redis.config.php 保全・PHP-FPM 追加設定） |
+| `containers/nextcloud/redis-patch.php` / `diag.php` | 独自追加（upstream に存在しない） |
+
+同期状況: upstream AIO の Nextcloud 33 ベース（2026-07 時点 main）に追従済み。
 
 ## デプロイ
 
