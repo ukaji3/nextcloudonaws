@@ -95,6 +95,15 @@ describe('NextcloudAioStack', () => {
     });
   });
 
+  describe('Audit log forwarder', () => {
+    test('P1-a 回帰: Lambda がログストリームを自動作成する', () => {
+      const fns = template.findResources('AWS::Lambda::Function');
+      const serialized = JSON.stringify(fns);
+      expect(serialized).toContain('create_log_stream');
+      expect(serialized).toContain('ResourceAlreadyExistsException');
+    });
+  });
+
   describe('Idempotency regressions', () => {
     test('タスク定義に非決定値 DEPLOY_TS が含まれない（P3 回帰）', () => {
       const taskDefs = template.findResources('AWS::ECS::TaskDefinition');

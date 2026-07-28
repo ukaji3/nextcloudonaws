@@ -324,13 +324,30 @@ export class NextcloudAioStack extends cdk.Stack {
 import base64, gzip, json, os, boto3
 client = boto3.client('logs')
 LOG_GROUP = os.environ['AUDIT_LOG_GROUP']
+_known_streams = set()
+
+def _ensure_stream(name):
+    """転送先ロググループにストリームが無ければ作成する（warm 実行間でキャッシュ）。"""
+    if name in _known_streams:
+        return
+    try:
+        client.create_log_stream(logGroupName=LOG_GROUP, logStreamName=name)
+    except client.exceptions.ResourceAlreadyExistsException:
+        pass
+    _known_streams.add(name)
+
 def handler(event, context):
     data = json.loads(gzip.decompress(base64.b64decode(event['awslogs']['data'])))
-    for e in data['logEvents']:
+    stream = data['logStream']
+    _ensure_stream(stream)
+    events = [{'timestamp': e['timestamp'], 'message': e['message']} for e in data['logEvents']]
+    events.sort(key=lambda e: e['timestamp'])
+    # PutLogEvents の上限（1バッチ10,000件/1MB）に対する保守的な分割
+    for i in range(0, len(events), 1000):
         client.put_log_events(
             logGroupName=LOG_GROUP,
-            logStreamName=data['logStream'],
-            logEvents=[{'timestamp': e['timestamp'], 'message': e['message']}],
+            logStreamName=stream,
+            logEvents=events[i:i+1000],
         )
 `),
       environment: { AUDIT_LOG_GROUP: auditLogGroup.logGroupName },
