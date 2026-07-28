@@ -1061,6 +1061,48 @@ else
     fi
 fi
 
+# --- AWS deployment customizations start (nextcloudonaws) ---
+# Repair custom_apps directories that ended up with a nested layout
+# (custom_apps/<app>/<app>/appinfo/info.xml instead of
+# custom_apps/<app>/appinfo/info.xml). Such a layout makes occ unable to
+# find the app ("Could not find <app>"), which in turn causes
+# "The <app> app could not be re-enabled" during upgrades.
+# The repair is idempotent: healthy app directories are left untouched.
+repair_nested_custom_apps() {
+    local app_dir app_id tmp_dir
+    for app_dir in /var/www/html/custom_apps/*/; do
+        [ -d "$app_dir" ] || continue
+        app_id="$(basename "$app_dir")"
+        # Healthy app directory -> nothing to do
+        if [ -f "${app_dir}appinfo/info.xml" ]; then
+            continue
+        fi
+        # Broken layout with a valid nested app -> move the nested app up
+        if [ -f "${app_dir}${app_id}/appinfo/info.xml" ]; then
+            echo "Repairing nested app directory layout for '$app_id'..."
+            tmp_dir="/var/www/html/custom_apps/.repair-${app_id}"
+            rm -rf "$tmp_dir"
+            if mv "${app_dir}${app_id}" "$tmp_dir" \
+                && rm -rf "/var/www/html/custom_apps/${app_id}" \
+                && mv "$tmp_dir" "/var/www/html/custom_apps/${app_id}"; then
+                echo "Repaired app directory for '$app_id'."
+                # Re-enable the app if it was auto-disabled while broken
+                if [ "$(php /var/www/html/occ config:app:get "$app_id" enabled)" = 'no' ]; then
+                    if ! php /var/www/html/occ app:enable "$app_id"; then
+                        echo "Could not re-enable '$app_id' after repairing its directory."
+                    fi
+                fi
+            else
+                echo "Failed to repair app directory for '$app_id'. Manual intervention required."
+            fi
+        else
+            echo "App directory '$app_id' has no appinfo/info.xml and no nested app; skipping (manual check recommended)."
+        fi
+    done
+}
+repair_nested_custom_apps
+# --- AWS deployment customizations end (nextcloudonaws) ---
+
 # Fulltextsearch
 if [ "$FULLTEXTSEARCH_ENABLED" = 'yes' ]; then
     count=0
@@ -1102,6 +1144,30 @@ if [ "$FULLTEXTSEARCH_ENABLED" = 'yes' ]; then
         php /var/www/html/occ fulltextsearch:configure '{"search_platform":"OCA\\FullTextSearch_Elasticsearch\\Platform\\ElasticSearchPlatform"}'
         php /var/www/html/occ fulltextsearch_elasticsearch:configure "{\"elastic_host\":\"$FULLTEXTSEARCH_PROTOCOL://$FULLTEXTSEARCH_USER:$FULLTEXTSEARCH_PASSWORD@$FULLTEXTSEARCH_HOST:$FULLTEXTSEARCH_PORT\",\"elastic_index\":\"$FULLTEXTSEARCH_INDEX\"}"
         php /var/www/html/occ files_fulltextsearch:configure "{\"files_pdf\":true,\"files_office\":true}"
+
+        # --- AWS deployment customizations start (nextcloudonaws) ---
+        # Patch: Allow OpenSearch (which lacks X-Elastic-Product header) to work with the Elasticsearch PHP client
+        PRODUCT_CHECK="/var/www/html/custom_apps/fulltextsearch_elasticsearch/lib/Vendor/Elastic/Elasticsearch/Traits/ProductCheckTrait.php"
+        if [ -f "$PRODUCT_CHECK" ] && grep -q 'ProductCheckException' "$PRODUCT_CHECK" && ! grep -q 'OpenSearch compat' "$PRODUCT_CHECK"; then
+            sed -i 's/throw new ProductCheckException/return; \/\/ OpenSearch compat\n                throw new ProductCheckException/' "$PRODUCT_CHECK"
+            echo "Patched ProductCheckTrait.php for OpenSearch compatibility"
+        fi
+        # Patch: Disable Elasticsearch API compatibility headers (vnd.elasticsearch+json) unsupported by OpenSearch.
+        # Neutralizes the call site (handles both pristine and previously-renamed states).
+        ENDPOINT_TRAIT="/var/www/html/custom_apps/fulltextsearch_elasticsearch/lib/Vendor/Elastic/Elasticsearch/Traits/EndpointTrait.php"
+        if [ -f "$ENDPOINT_TRAIT" ] && ! grep -q 'OpenSearch compat: compatibility headers disabled' "$ENDPOINT_TRAIT"; then
+            sed -i 's/$headers = $this->buildCompatibilityHeaders\(_DISABLED\)\?($headers);/$headers = $headers; \/\/ OpenSearch compat: compatibility headers disabled/' "$ENDPOINT_TRAIT"
+            if grep -q 'OpenSearch compat: compatibility headers disabled' "$ENDPOINT_TRAIT"; then
+                echo "Patched EndpointTrait.php for OpenSearch compatibility"
+            else
+                echo "WARNING: EndpointTrait.php patch target not found; OpenSearch compatibility patch NOT applied"
+            fi
+        fi
+        # Patch: Fix highlight field name difference (Elasticsearch: max_analyzed_offset, OpenSearch: max_analyzer_offset)
+        find /var/www/html/custom_apps/fulltextsearch_elasticsearch/ -name '*.php' -exec \
+            sed -i 's/max_analyzed_offset/max_analyzer_offset/g' {} +
+        echo "Patched highlight field name for OpenSearch compatibility"
+        # --- AWS deployment customizations end (nextcloudonaws) ---
 
         # Do the index
         if ! [ -f "$NEXTCLOUD_DATA_DIR/fts-index.done" ]; then
