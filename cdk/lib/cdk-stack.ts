@@ -99,18 +99,25 @@ export class NextcloudAioStack extends cdk.Stack {
 
     const nextcloud = buildNextcloudTask(this, {
       config, taskRole, executionRole, logGroup, files, bucket, dbCluster, dbSecret, cache,
-      adminSecret, onlyofficeSecret, featureSecrets, osDomain,
+      adminSecret, onlyofficeSecret, featureSecrets, osDomain, trustedProxies: network.natPublicIps,
     });
+    // nextcloud / apache / notify-push: the upgrade state machine owns their
+    // desired count (scale to 0, restore SERVICE_BASELINE), so CloudFormation
+    // must not change it on update.
     const nextcloudSvc = createFargateService(ctx, 'nextcloud', nextcloud.taskDefinition, {
-      desiredCount: SERVICE_BASELINE.nextcloud, minCapacity: 1, maxCapacity: 10,
+      desiredCount: SERVICE_BASELINE.nextcloud, minCapacity: 1, maxCapacity: 10, managedDesiredCount: true,
     });
 
     const apacheTd = buildApacheTask(this, config, common, files);
-    const apacheSvc = createFargateService(ctx, 'apache', apacheTd, { desiredCount: SERVICE_BASELINE.apache, minCapacity: 2, maxCapacity: 5 });
+    const apacheSvc = createFargateService(ctx, 'apache', apacheTd, {
+      desiredCount: SERVICE_BASELINE.apache, minCapacity: 2, maxCapacity: 5, managedDesiredCount: true,
+    });
     apacheSvc.node.addDependency(nextcloudSvc);
 
     const notifyTd = buildNotifyPushTask(this, config, common, files);
-    const notifySvc = createFargateService(ctx, 'notify-push', notifyTd, { desiredCount: SERVICE_BASELINE.notifyPush });
+    const notifySvc = createFargateService(ctx, 'notify-push', notifyTd, {
+      desiredCount: SERVICE_BASELINE.notifyPush, managedDesiredCount: true,
+    });
     notifySvc.node.addDependency(nextcloudSvc);
 
     const optional = this.buildOptionalServices({

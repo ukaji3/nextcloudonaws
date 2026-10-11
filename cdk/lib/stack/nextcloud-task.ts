@@ -30,6 +30,8 @@ export interface NextcloudTaskProps {
   readonly onlyofficeSecret: secretsmanager.ISecret;
   readonly featureSecrets: FeatureSecrets;
   readonly osDomain?: opensearch.IDomain;
+  /** Extra trusted proxies (NAT Gateway public IPs), see aws-trusted-proxies.sh. */
+  readonly trustedProxies: readonly string[];
 }
 
 /**
@@ -178,6 +180,8 @@ function nextcloudEnvironment(props: NextcloudTaskProps): Environment {
     ...integrationEnvironment(props.config),
     ...fulltextsearchEnvironment(props.config, props.osDomain),
     ...appsEnvironment(),
+    // Space-separated; resolved by CloudFormation to the NAT Gateway public IPs.
+    AWS_TRUSTED_PROXIES: cdk.Fn.join(' ', [...props.trustedProxies]),
   };
 }
 

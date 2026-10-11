@@ -106,6 +106,40 @@ describe('NextcloudAioStack', () => {
     });
   });
 
+  describe('Desired count ownership', () => {
+    const services = template.findResources('AWS::ECS::Service');
+    const byName = (fragment: string): Record<string, unknown> | undefined => {
+      const entry = Object.entries(services).find(([id]) => id.startsWith(fragment));
+      return entry ? (entry[1] as { Properties: Record<string, unknown> }).Properties : undefined;
+    };
+
+    test.each(['nextcloudService', 'apacheService', 'notifypushService'])(
+      '並行起動回帰: SFN が台数を管理する %s は DesiredCount を持たない',
+      (id) => {
+        const props = byName(id);
+        expect(props).toBeDefined();
+        expect(props?.DesiredCount).toBeUndefined();
+      },
+    );
+
+    test('SFN 管理外のサービスは DesiredCount を持つ', () => {
+      expect(byName('onlyofficeService')?.DesiredCount).toBe(1);
+    });
+  });
+
+  describe('Trusted proxies', () => {
+    test('AWS_TRUSTED_PROXIES に全 NAT Gateway の EIP を渡す', () => {
+      const eipIds = Object.keys(template.findResources('AWS::EC2::EIP'));
+      expect(eipIds.length).toBe(2);
+      const containers = Object.values(template.findResources('AWS::ECS::TaskDefinition'))
+        .flatMap((td) => (td as { Properties: { ContainerDefinitions: { Name: string; Environment: { Name: string; Value: unknown }[] }[] } }).Properties.ContainerDefinitions);
+      const env = containers.find((c) => c.Name === 'nextcloud')?.Environment.find((e) => e.Name === 'AWS_TRUSTED_PROXIES');
+      expect(env?.Value).toEqual({
+        'Fn::Join': [' ', eipIds.map((id) => ({ 'Fn::GetAtt': [id, 'PublicIp'] }))],
+      });
+    });
+  });
+
   describe('Nextcloud container health check', () => {
     test('php-fpm の待受を見る実ヘルスチェック（exit 0 固定ではない）', () => {
       const taskDefs = template.findResources('AWS::ECS::TaskDefinition');

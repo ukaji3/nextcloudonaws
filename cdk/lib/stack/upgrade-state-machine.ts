@@ -318,8 +318,9 @@ function waitForOperatorDeploy(scope: Construct): { queue: sqs.Queue; wait: task
       taskToken: sfn.JsonPath.taskToken,
       instruction: [
         '1) cdk.json の nextcloudImageUri を新イメージに更新',
-        '2) npx cdk deploy NextcloudAioStack',
-        '3) aws stepfunctions send-task-success --task-token <taskToken> --task-output {}',
+        '2) npx cdk deploy NextcloudAioStack（台数 0 のままタスク定義だけが切り替わる）',
+        '3) deploy 完了後すぐに aws stepfunctions send-task-success --task-token <taskToken> --task-output {}',
+        '   （新タスクはステートマシンが起動し、アップグレード完了まで待つ）',
         '中止する場合: aws stepfunctions send-task-failure --task-token <taskToken>',
       ].join(' / '),
     }),
@@ -404,8 +405,10 @@ export function buildUpgradeStateMachine(scope: Construct, props: UpgradeStateMa
   const snapshot = snapshotDatabase(scope, factory, props.dbCluster);
   const backup = backupConfig(factory, props.bucket);
   const approval = waitForOperatorDeploy(scope);
-  // cdk deploy only updates services whose task definition changed, so the
-  // desired counts lowered by this workflow are restored explicitly.
+  // The services leave their desired count out of the template, so the deploy
+  // only swaps task definitions while the count stays 0. Restoring the baseline
+  // here starts tasks of the new revision only; the health poll below then waits
+  // until the new task has finished occ upgrade and php-fpm serves requests.
   const restoreBaseline = factory.scaleAll('RestoreBaseline', 'Restore', props.baseline);
   const healthy = waitTargetsHealthy(scope, factory, props.apacheTargetGroup);
   const verifyUpgrade = factory.occStep('VerifyUpgrade', [...OCC, 'status']);

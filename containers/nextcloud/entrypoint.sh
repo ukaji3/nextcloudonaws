@@ -770,6 +770,14 @@ if [ -n "$IPv4_ADDRESS" ]; then
     php /var/www/html/occ config:system:set trusted_proxies 10 --value="$IPv4_ADDRESS"
 fi
 
+# --- AWS deployment customizations start (nextcloudonaws) ---
+# Trust the NAT Gateway public IPs (AWS_TRUSTED_PROXIES, set by the CDK stack):
+# requests from inside the VPC to the public URL (e.g. notify_push) arrive via NAT.
+# shellcheck source=aws-trusted-proxies.sh
+. /aws-trusted-proxies.sh
+aws_apply_trusted_proxies
+# --- AWS deployment customizations end (nextcloudonaws) ---
+
 if [ -n "$ADDITIONAL_TRUSTED_DOMAIN" ]; then
     php /var/www/html/occ config:system:set trusted_domains 2 --value="$ADDITIONAL_TRUSTED_DOMAIN"
 fi

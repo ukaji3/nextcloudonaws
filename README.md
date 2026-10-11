@@ -43,6 +43,7 @@ docs/                    デプロイメントガイド
 | `containers/nextcloud/entrypoint.sh` | rsync に `--inplace` 付与（EFS 対応）、custom_apps 入れ子ディレクトリの自己修復（`aws_repair_custom_apps_and_upgrade` を3箇所で実行）、OpenSearch 互換パッチ（ProductCheckTrait / EndpointTrait 呼び出し無効化 / highlight `max_analyzer_offset`）、`fulltextsearch_elasticsearch:configure` の出力抑止（資格情報をログに出さない）、末尾に AWS 固有ブロック（diag.php 配置・redis セッションハンドラ除去・redis.config.php 保全・PHP-FPM 追加設定） |
 | `containers/nextcloud/aws-custom-apps-repair.sh` | 独自追加。EFS 上でアプリ更新後に生じる入れ子ディレクトリの修復ライブラリ（テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/aws-healthcheck.sh` | 独自追加。ECS 用ヘルスチェック（php-fpm の待受で正常、インストール・アップグレード中は保護。テスト: `containers/nextcloud/tests/`） |
+| `containers/nextcloud/aws-trusted-proxies.sh` | 独自追加。NAT Gateway の EIP（`AWS_TRUSTED_PROXIES`）を `trusted_proxies` 20〜29 番に設定（notify_push 用。テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/diag.php` | 独自追加（Redis 接続診断。外部からは 404） |
 
 同期状況: Nextcloud 34.0.4 / PHP 8.4.26 / dinit。upstream AIO main `da7cf9d7`（2026-10-08）に同期済みで、上表以外のファイル（start.sh・notify*.sh・dinit.d/・config/ の大半など）は upstream と同一。以前の redis-patch.php（Redis.php の全置換）は、Nextcloud 33.0.7 以降の公式実装が SCAN + UNLINK に変わったため撤去した。
@@ -107,9 +108,9 @@ aws stepfunctions start-execution --state-machine-arn arn:aws:states:<region>:<a
 aws sqs receive-message --queue-url <UpgradeQueueUrl> --wait-time-seconds 20
 ```
 
-4. `cdk.json` の `nextcloudImageUri` を新しいタグに更新し `npx cdk deploy` する（旧タスクは停止済みのため、新イメージの entrypoint が安全に `occ upgrade` を実行する）
+4. `cdk.json` の `nextcloudImageUri` を新しいタグに更新し `npx cdk deploy` する（台数は 0 のまま、タスク定義だけが切り替わる。nextcloud / apache / notify-push の台数はテンプレートで指定せず、ステートマシンが管理する）
 
-5. 新タスクのログで `occ upgrade` の完了（`Update successful`）を確認してから、トークンで実行を再開する（検証 → maintenance OFF → 完了）
+5. deploy が終わったらすぐトークンで実行を再開する。ステートマシンが新リビジョンのタスクだけを起動し、`occ upgrade` が終わって ALB ターゲットが healthy になるまで待ってから、検証 → maintenance OFF → 完了と進む
 
 ```bash
 aws stepfunctions send-task-success --task-token '<taskToken>' --task-output '{}'

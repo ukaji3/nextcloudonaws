@@ -12,6 +12,25 @@ export interface NetworkResources {
   readonly dbSg: ec2.SecurityGroup;
   readonly cacheSg: ec2.SecurityGroup;
   readonly efsSg: ec2.SecurityGroup;
+  /**
+   * Public IPs of the NAT Gateways (CloudFormation references). Traffic from the
+   * tasks to the public URL of Nextcloud comes from these addresses.
+   */
+  readonly natPublicIps: readonly string[];
+}
+
+/**
+ * Public IPs of the Elastic IPs that CDK creates for the NAT Gateways
+ * (one "EIP" child per public subnet).
+ *
+ * @param vpc - VPC whose NAT Gateways are inspected.
+ * @returns Public IP references, in subnet order.
+ */
+function natGatewayPublicIps(vpc: ec2.Vpc): string[] {
+  return vpc.publicSubnets
+    .map((subnet) => subnet.node.tryFindChild('EIP'))
+    .filter((child): child is ec2.CfnEIP => child instanceof ec2.CfnEIP)
+    .map((eip) => eip.attrPublicIp);
 }
 
 /**
@@ -64,5 +83,5 @@ export function buildNetwork(scope: Construct, apachePort: number): NetworkResou
   const efsSg = new ec2.SecurityGroup(scope, 'EfsSg', { vpc, description: 'EFS' });
   efsSg.addIngressRule(ecsSg, ec2.Port.tcp(2049));
 
-  return { vpc, albSg, ecsSg, dbSg, cacheSg, efsSg };
+  return { vpc, albSg, ecsSg, dbSg, cacheSg, efsSg, natPublicIps: natGatewayPublicIps(vpc) };
 }

@@ -973,13 +973,14 @@ CDK に Step Functions ステートマシン `nextcloud-upgrade` を含めてい
   WaitForDeploy          SQS にタスクトークンを送って待機（最大 3 時間）
 
 [operator]
-  cdk.json の nextcloudImageUri を更新 → npx cdk deploy
-  → 新タスクの entrypoint.sh が occ upgrade を実行
-  → aws stepfunctions send-task-success でトークンを返す
+  cdk.json の nextcloudImageUri を更新 → npx cdk deploy（台数 0 のままタスク定義だけ切り替わる）
+  → deploy 完了後すぐ aws stepfunctions send-task-success でトークンを返す
 
-[Phase 2: 検証・復帰（自動）]
-  RestoreBaseline        desired count を基準値に戻す（cdk deploy は無変更サービスを戻さないため）
+[Phase 2: 起動・検証・復帰（自動）]
+  RestoreBaseline        desired count を基準値に戻す → 新リビジョンのタスクだけが起動し、
+                         entrypoint.sh が occ upgrade を実行
   CheckTargetsHealthy    ALB ターゲットが healthy になるまで 20 秒間隔でポーリング
+                         （php-fpm は entrypoint.sh の完了後に起動するので、healthy ＝ アップグレード完了）
   VerifyUpgrade          occ status（ExitCode 検査）
   MaintenanceOffFinal    occ maintenance:mode --off
   UpgradeSucceeded
@@ -1004,10 +1005,10 @@ aws stepfunctions start-execution \
 # 3. WaitForDeploy に到達したらタスクトークンを受け取る（スタック出力 UpgradeQueueUrl）
 aws sqs receive-message --queue-url <UpgradeQueueUrl> --wait-time-seconds 20
 
-# 4. cdk.json の nextcloudImageUri を <tag> に更新してデプロイ
+# 4. cdk.json の nextcloudImageUri を <tag> に更新してデプロイ（台数 0 のまま、タスクは起動しない）
 cd cdk && npx cdk diff && npx cdk deploy
 
-# 5. 新タスクのログでアップグレード完了（"Update successful"）を確認してから再開
+# 5. deploy が終わったらすぐ再開（以降のタスク起動・アップグレード完了待ちはステートマシンが行う）
 aws stepfunctions send-task-success --task-token '<taskToken>' --task-output '{}'
 
 # 中止する場合
@@ -1178,7 +1179,7 @@ aws ecs execute-command \
 
 | 制約 | 影響 | 回避策 |
 |---|---|---|
-| notify_push の trusted proxy 警告 | `occ notify_push:self-test` の最後の項目（trusted proxy）だけ失敗する。push server が公開 URL 経由で Nextcloud に接続するため、Nextcloud には送信元として NAT Gateway の EIP が見える | Redis 受信・DB・Nextcloud への接続は正常（2026-10-11 確認）。影響は push server がユーザーの実 IP を判定できないことのみで、通知の配信自体は動く。解消するには NAT Gateway の EIP を trusted_proxies に加える（未実施） |
+| notify_push と trusted proxy | push server は公開 URL 経由で Nextcloud に接続するため、Nextcloud には送信元として NAT Gateway の EIP が見える | CDK が NAT Gateway の EIP を `AWS_TRUSTED_PROXIES` で渡し、entrypoint.sh が `trusted_proxies` の 20〜29 番に毎回書き直す（`aws-trusted-proxies.sh`、テスト: `tests/test-aws-trusted-proxies.sh`）。NAT Gateway を作り直しても古い IP は残らない |
 | Nextcloud コンテナのヘルスチェック | `aws-healthcheck.sh` は php-fpm が待受を始めた時点で正常とする。インストール・アップグレード中（メンテナンスモード、`occ upgrade` / rsync 実行中）も正常扱いにして、途中で入れ替えられないようにしている。起動に時間がかかっても、新タスクが正常になるまで旧タスクが応答を続ける（2026-10-11 の検証で 10 秒間隔の監視 84 回中 83 回 200） | アップグレードを伴うイメージ更新は引き続き 13 章の手順で行う |
 | アプリ更新で custom_apps が入れ子になる | 該当アプリが認識されず停止する | entrypoint.sh が起動時に自動修復する（10.2 参照） |
 | Collabora 非対応 | ドキュメント編集に Collabora を使用できない | OnlyOffice を使用 |

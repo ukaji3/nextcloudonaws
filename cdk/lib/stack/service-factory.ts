@@ -19,9 +19,24 @@ export interface ServiceContext {
  * Desired count and optional CPU-based auto scaling of a service.
  */
 export interface ServiceOptions {
+  /**
+   * Desired count. When {@link managedDesiredCount} is true this is only used
+   * as the documented baseline; CloudFormation does not set it.
+   */
   readonly desiredCount?: number;
   readonly minCapacity?: number;
   readonly maxCapacity?: number;
+  /**
+   * Leave the desired count out of the template (default false).
+   *
+   * Use for services whose count is changed outside CloudFormation (the upgrade
+   * state machine scales them to 0 and restores them). CloudFormation then
+   * creates the service with 1 task and never changes the count on update, so a
+   * `cdk deploy` during an upgrade only swaps the task definition. Changing the
+   * count and the task definition in one UpdateService call made ECS start a
+   * task of the previous revision as well (observed on 2026-10-11).
+   */
+  readonly managedDesiredCount?: boolean;
 }
 
 /**
@@ -53,7 +68,7 @@ export function createFargateService(
   const svc = new ecs.FargateService(ctx.scope, `${name}Service`, {
     cluster: ctx.cluster,
     taskDefinition,
-    desiredCount: opts?.desiredCount ?? 1,
+    desiredCount: opts?.managedDesiredCount ? undefined : (opts?.desiredCount ?? 1),
     securityGroups: [ctx.ecsSg],
     vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
     cloudMapOptions: {
