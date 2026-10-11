@@ -57,8 +57,11 @@ interface PollLoop {
   readonly done: sfn.INextable;
 }
 
-/** occ prefix: occ must run as the owner of config.php. */
-const OCC = ['sudo', '-E', '-u', 'www-data', 'php', '/var/www/html/occ'];
+/**
+ * occ prefix: occ must run as the owner of config.php. su-exec is used (as in
+ * upstream AIO); it keeps the environment, like the former "sudo -E -u".
+ */
+const OCC = ['su-exec', 'www-data', 'php', '/var/www/html/occ'];
 
 /**
  * Builds the reusable step types of the upgrade workflow.

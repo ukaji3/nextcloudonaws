@@ -38,13 +38,14 @@ docs/                    デプロイメントガイド
 
 | ファイル | 変更内容 |
 |---|---|
-| `containers/nextcloud/Dockerfile` | `app/` 依存除去、COPY パス変更、AIO_TOKEN/AIO_URL 削除、aws-cli 追加（アップグレード SFN の config.php バックアップ用）、`AIO_LOG_LEVEL` デフォルト定義、redis-patch.php/diag.php の COPY、sudo を su-exec と併存（SFN が `sudo -E -u www-data` を使用） |
+| `containers/nextcloud/Dockerfile` | `app/` 依存除去、COPY パス変更、AIO_TOKEN/AIO_URL 削除、aws-cli 追加（アップグレード SFN の config.php バックアップ用）、`AIO_LOG_LEVEL` デフォルト定義、diag.php の COPY、`clear_env = no` |
 | `containers/nextcloud/config/redis.config.php` | ElastiCache Serverless 用に全面書き換え（`REDIS_TLS_ENABLED` による TLS 接続、クラスタモード設定） |
-| `containers/nextcloud/entrypoint.sh` | rsync に `--inplace` 付与（EFS 対応）、custom_apps 入れ子ディレクトリの自己修復（`aws_repair_custom_apps_and_upgrade` を3箇所で実行）、OpenSearch 互換パッチ（ProductCheckTrait / EndpointTrait 呼び出し無効化 / highlight `max_analyzer_offset`）、`fulltextsearch_elasticsearch:configure` の出力抑止（資格情報をログに出さない）、末尾に AWS 固有ブロック（redis-patch 適用・diag.php 配置・redis セッションハンドラ除去・redis.config.php 保全・PHP-FPM 追加設定） |
+| `containers/nextcloud/entrypoint.sh` | rsync に `--inplace` 付与（EFS 対応）、custom_apps 入れ子ディレクトリの自己修復（`aws_repair_custom_apps_and_upgrade` を3箇所で実行）、OpenSearch 互換パッチ（ProductCheckTrait / EndpointTrait 呼び出し無効化 / highlight `max_analyzer_offset`）、`fulltextsearch_elasticsearch:configure` の出力抑止（資格情報をログに出さない）、末尾に AWS 固有ブロック（diag.php 配置・redis セッションハンドラ除去・redis.config.php 保全・PHP-FPM 追加設定） |
 | `containers/nextcloud/aws-custom-apps-repair.sh` | 独自追加。EFS 上でアプリ更新後に生じる入れ子ディレクトリの修復ライブラリ（テスト: `containers/nextcloud/tests/`） |
-| `containers/nextcloud/redis-patch.php` / `diag.php` | 独自追加（upstream に存在しない） |
+| `containers/nextcloud/aws-healthcheck.sh` | 独自追加。ECS 用ヘルスチェック（php-fpm の待受で正常、インストール・アップグレード中は保護。テスト: `containers/nextcloud/tests/`） |
+| `containers/nextcloud/diag.php` | 独自追加（Redis 接続診断。外部からは 404） |
 
-同期状況: Nextcloud 33.0.9 / PHP 8.3.33。start.sh・notify.sh・notify-all.sh・root.motd・supervisord.conf・upgrade-latest-major.sh は upstream AIO の Nextcloud 33 系最終コミット `aeecdd73`（2026-08-25、34 への移行直前）と同一。upstream は以降 Nextcloud 34/35・PHP 8.4・dinit に移行しており未追従。
+同期状況: Nextcloud 34.0.4 / PHP 8.4.26 / dinit。upstream AIO main `da7cf9d7`（2026-10-08）に同期済みで、上表以外のファイル（start.sh・notify*.sh・dinit.d/・config/ の大半など）は upstream と同一。以前の redis-patch.php（Redis.php の全置換）は、Nextcloud 33.0.7 以降の公式実装が SCAN + UNLINK に変わったため撤去した。
 
 ## デプロイ
 
@@ -70,7 +71,7 @@ npx cdk deploy
 | `auroraBackupRetentionDays` | Aurora 自動バックアップの保持日数（既定 7） |
 | `backupDailyRetentionDays` / `backupWeeklyRetentionDays` | AWS Backup の保持日数（既定 35 / 90） |
 | `ecrScanRepositories` | プッシュ時スキャン対象の ECR リポジトリ（既定 `aio-nextcloud`） |
-| `aioImageTag` / `aioNotifyPushImageTag` | AIO 周辺イメージのタグ（notify-push は互換性のため別管理） |
+| `aioImageTag` / `aioNotifyPushImageTag` | AIO 周辺イメージのタグ（notify-push は省略時 `aioImageTag` と同じ） |
 
 詳細は [docs/aws-deployment.md](docs/aws-deployment.md) を参照。
 
@@ -114,7 +115,7 @@ aws sqs receive-message --queue-url <UpgradeQueueUrl> --wait-time-seconds 20
 aws stepfunctions send-task-success --task-token '<taskToken>' --task-output '{}'
 ```
 
-失敗時はステートマシンが desired count を復元する（ベストエフォート）。DB の復旧はスナップショット `pre-upgrade-<executionId>` から、EFS は AWS Backup の復旧ポイントから行う。アップグレードの間（33.0.7 → 33.0.9 で約 57 分）はサービスが停止する。
+失敗時はステートマシンが desired count を復元する（ベストエフォート）。DB の復旧はスナップショット `pre-upgrade-<executionId>` から、EFS は AWS Backup の復旧ポイントから行う。アップグレードの間（33.0.7 → 33.0.9 で約 57 分、33.0.9 → 34.0.4 で約 65 分）はサービスが停止する。
 
 ## upstream の更新追従
 

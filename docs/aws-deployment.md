@@ -26,7 +26,7 @@ Nextcloud AIO のコンテナイメージを AWS ECS Fargate 上でデプロイ�
 
 - **CloudFront は使用しない** — Nextcloud は WebDAV プロトコル（PROPFIND, MKCOL, MOVE, LOCK 等）を使用するが、CloudFront はこれらの HTTP メソッドをサポートしていない
 - **Collabora は使用しない** — `CAP_SYS_ADMIN` / `SYS_CHROOT` が必要だが Fargate は非対応。代わりに OnlyOffice を使用する
-- **notify_push は機能していない** — notify-push サービスは起動しているが、self-test が Redis タイムアウトで失敗する（15 章参照）。デスクトップ/モバイルクライアントは最大30秒間隔のポーリングで同期する
+- **notify_push は Nextcloud の config.php を共有して動く** — notify-push コンテナは `/var/www/html`（EFS）を読み取り専用でマウントし、DB と Redis（クラスタモード・TLS）の設定を config.php から読む。資格情報は環境変数で渡さない
 - **DB/Redis/ファイルストレージは全て AWS マネージドサービスに外部化** — コンテナをステートレスにし、水平スケーリングを可能にする
 - **シークレットは Secrets Manager で管理** — DB パスワード、OpenSearch パスワード、OnlyOffice JWT シークレット等は全て Secrets Manager に格納し、ECS タスク定義から参照する
 
@@ -745,7 +745,8 @@ HTTPS:                 強制
 | `containers/nextcloud/entrypoint.sh` | 修正 | 下記の変更を含む |
 | `containers/nextcloud/aws-custom-apps-repair.sh` | 追加 | custom_apps 入れ子ディレクトリの修復ライブラリ（10.2 参照） |
 | `containers/nextcloud/tests/test-aws-custom-apps-repair.sh` | 追加 | 上記ライブラリのテスト（`bash containers/nextcloud/tests/test-aws-custom-apps-repair.sh`） |
-| `containers/nextcloud/Dockerfile` | 修正 | aws-cli 追加、su-exec と sudo を併存（SFN が `sudo -E -u www-data` を使用するため） |
+| `containers/nextcloud/Dockerfile` | 修正 | aws-cli 追加、`clear_env = no`、diag.php の COPY（upstream AIO main に同期済み。PHP 8.4 / dinit / su-exec） |
+| `containers/nextcloud/aws-healthcheck.sh` | 追加 | ECS 用ヘルスチェック（15 章参照、テスト: `tests/test-aws-healthcheck.sh`） |
 
 ### 10.1 entrypoint.sh の変更内容
 
@@ -855,8 +856,7 @@ npm install
     "hostedZoneId": "Z1234567890ABC",
     "hostedZoneName": "example.com",
     "aioImageTag": "20260929_105435",
-    "aioNotifyPushImageTag": "20260218_123804",
-    "nextcloudImageUri": "<ACCOUNT_ID>.dkr.ecr.ap-northeast-1.amazonaws.com/aio-nextcloud:nc33.0.9-<timestamp>",
+    "nextcloudImageUri": "<ACCOUNT_ID>.dkr.ecr.ap-northeast-1.amazonaws.com/aio-nextcloud:nc34.0.4-<timestamp>",
     "apachePort": 11000,
     "enableOnlyOffice": "true",
     "enableTalk": "true",
@@ -884,7 +884,7 @@ npm install
 | `hostedZoneId` | Route 53 ホストゾーン ID（指定時は DNS レコード自動作成） |
 | `hostedZoneName` | Route 53 ホストゾーン名（例: `example.com`） |
 | `aioImageTag` | AIO イメージ（apache / onlyoffice / imaginary / talk）のタグ |
-| `aioNotifyPushImageTag` | notify-push イメージのタグ。2026-01 以降の upstream は起動方式が変わり（`/var/www/html/config/config.php` を直接読む）、本スタックのマウント（`/nextcloud`）と合わないため旧タグに固定している |
+| `aioNotifyPushImageTag` | notify-push イメージのタグ（省略時は `aioImageTag` と同じ）。notify-push だけ別の版に固定したい場合に使う |
 | `nextcloudImageUri` | カスタムビルドした Nextcloud イメージの URI（空の場合は公式イメージ） |
 | `enableOnlyOffice` | OnlyOffice の有効化 |
 | `enableTalk` | Talk (TURN/シグナリング) の有効化 |
@@ -1014,7 +1014,9 @@ aws stepfunctions send-task-success --task-token '<taskToken>' --task-output '{}
 aws stepfunctions send-task-failure --task-token '<taskToken>'
 ```
 
-所要時間の目安: 2026-10-11 の 33.0.7 → 33.0.9 では、起動から SUCCEEDED まで約 57 分（Phase 1 が約 14 分、`occ upgrade` の code integrity check が約 3 分）。この間サービスは停止する。
+所要時間の目安（2026-10-11 実績）: 33.0.7 → 33.0.9 で約 57 分、33.0.9 → 34.0.4（メジャー更新）で約 65 分。Phase 1 が約 15 分、新タスクの起動とアップグレード（rsync・`occ upgrade` 2 回・code integrity check）が約 30 分。この間サービスは停止する。
+
+メジャー更新前には AWS Backup のオンデマンドバックアップ（EFS と Aurora）も取っておく。また、メジャー更新では entrypoint.sh がアプリを一旦無効化し、更新後に元へ戻す。戻せなかったアプリは管理者に通知されるので、完了後に `occ app:list` で確認する。
 
 ### 13.3 ロールバック
 
@@ -1047,7 +1049,7 @@ aws ecs run-task \
   --task-definition <NextcloudTd family> \
   --launch-type FARGATE \
   --network-configuration "awsvpcConfiguration={subnets=[...],securityGroups=[...],assignPublicIp=DISABLED}" \
-  --overrides '{"containerOverrides":[{"name":"nextcloud","command":["sudo","-E","-u","www-data","php","/var/www/html/occ","files:scan","--all"]}]}'
+  --overrides '{"containerOverrides":[{"name":"nextcloud","command":["su-exec","www-data","php","/var/www/html/occ","files:scan","--all"]}]}'
 ```
 
 `command` の上書きで置き換わるのは CMD だけで、ENTRYPOINT の `/start.sh` は残る。そのためワンショットタスクでも entrypoint.sh（初期化・アプリ更新・修復）が先に一通り実行され、その後に指定コマンドが動く。調査目的の読み取り操作は、稼働中タスクへの `execute-command`（15 章の TTY 割り当て方法を参照）の方が速い。
@@ -1176,8 +1178,8 @@ aws ecs execute-command \
 
 | 制約 | 影響 | 回避策 |
 |---|---|---|
-| notify_push が機能していない | デスクトップ/モバイルクライアントの同期がポーリング（最大30秒）になる | アプリは有効だが `occ notify_push:self-test` が Redis タイムアウトで失敗する（2026-10-11 確認）。notify-push イメージは旧タグに固定している（12.2 の `aioNotifyPushImageTag` 参照） |
-| コンテナのヘルスチェックが `exit 0` 固定 | ECS は起動途中の新タスクを healthy とみなし、旧タスクを先に止める。起動時に `occ upgrade` が走ると、その間（2026-10-11 実績で約19分）502 になる | アップグレードを伴うイメージ更新は 13 章の Step Functions 手順で行う（計画停止として扱う） |
+| notify_push の trusted proxy 警告 | `occ notify_push:self-test` の最後の項目（trusted proxy）だけ失敗する。push server が公開 URL 経由で Nextcloud に接続するため、Nextcloud には送信元として NAT Gateway の EIP が見える | Redis 受信・DB・Nextcloud への接続は正常（2026-10-11 確認）。影響は push server がユーザーの実 IP を判定できないことのみで、通知の配信自体は動く。解消するには NAT Gateway の EIP を trusted_proxies に加える（未実施） |
+| Nextcloud コンテナのヘルスチェック | `aws-healthcheck.sh` は php-fpm が待受を始めた時点で正常とする。インストール・アップグレード中（メンテナンスモード、`occ upgrade` / rsync 実行中）も正常扱いにして、途中で入れ替えられないようにしている。起動に時間がかかっても、新タスクが正常になるまで旧タスクが応答を続ける（2026-10-11 の検証で 10 秒間隔の監視 84 回中 83 回 200） | アップグレードを伴うイメージ更新は引き続き 13 章の手順で行う |
 | アプリ更新で custom_apps が入れ子になる | 該当アプリが認識されず停止する | entrypoint.sh が起動時に自動修復する（10.2 参照） |
 | Collabora 非対応 | ドキュメント編集に Collabora を使用できない | OnlyOffice を使用 |
 | `ecs execute-command` の出力制限 | 擬似 TTY が無いと出力が取れない | `script -qec "aws ecs execute-command ... --interactive --command '...'" /dev/null` で TTY を割り当てる |

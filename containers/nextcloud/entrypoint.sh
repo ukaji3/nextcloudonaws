@@ -475,7 +475,11 @@ EOF
             php /var/www/html/occ config:system:set versions_retention_obligation --value="auto, 30"
             php /var/www/html/occ config:system:set activity_expire_days --value="30" --type=integer
             php /var/www/html/occ config:system:set simpleSignUpLink.shown --type=bool --value=false
-            php /var/www/html/occ config:system:set share_folder --value="/Shared"
+            if [ -z "$NEXTCLOUD_SHARE_FOLDER" ]; then
+                php /var/www/html/occ config:system:set share_folder --value="/Shared"
+            else
+                php /var/www/html/occ config:system:set share_folder --value="$NEXTCLOUD_SHARE_FOLDER"
+            fi
 
             # Install some apps by default
             if [ -n "$STARTUP_APPS" ]; then
@@ -610,11 +614,11 @@ if [ -z "$OBJECTSTORE_S3_BUCKET" ] && [ -z "$OBJECTSTORE_SWIFT_URL" ]; then
 fi
 
 # --- AWS deployment customizations start (nextcloudonaws) ---
-# Apply patches and custom PHP-FPM config (always, regardless of version)
-if [ -f /var/www/html/lib/private/Memcache/Redis.php ] && [ -f /opt/redis-patch.php ]; then
-    cp /opt/redis-patch.php /var/www/html/lib/private/Memcache/Redis.php
-    echo "Patched Redis.php: KEYS replaced with SCAN"
-fi
+# Apply custom PHP-FPM config (always, regardless of version)
+# (The former redis-patch.php, which replaced lib/private/Memcache/Redis.php to
+# use SCAN instead of KEYS, was removed: Nextcloud ships a SCAN + UNLINK,
+# cluster-safe clear() since 33.0.7, and overwriting the file with a copy from
+# an older release would downgrade core code.)
 [ -f /usr/src/nextcloud/diag.php ] && cp /usr/src/nextcloud/diag.php /var/www/html/diag.php
 # Remove Redis session handler - ElastiCache Serverless is cluster-mode, PHP session.save_handler=redis is non-cluster
 rm -f /usr/local/etc/php/conf.d/redis-session.ini
@@ -968,6 +972,8 @@ if [ "$TALK_ENABLED" = 'yes' ]; then
     elif [ "$SKIP_UPDATE" != 1 ]; then
         php /var/www/html/occ app:update spreed
     fi
+    # We auto-renew the certs via caddy so the outdated cert warning should not be displayed
+    php /var/www/html/occ config:app:set spreed certificate_expiration_days --type=integer --value="2"
     # Add turn server
     # shellcheck disable=SC2153
     if ! php /var/www/html/occ talk:turn:list --output="plain" | grep server | grep -q " $TURN_DOMAIN:$TALK_PORT"; then

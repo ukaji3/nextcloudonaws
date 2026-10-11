@@ -81,9 +81,44 @@ describe('NextcloudAioStack', () => {
     test('occ は www-data ユーザーで実行される（D-4 回帰）', () => {
       const machines = template.findResources('AWS::StepFunctions::StateMachine');
       const serialized = JSON.stringify(machines);
-      expect(serialized).toContain('sudo');
+      expect(serialized).toContain('su-exec');
+      expect(serialized).not.toContain('sudo');
       expect(serialized).toContain('www-data');
       expect(serialized).toContain('maintenance:mode');
+    });
+  });
+
+  describe('notify-push', () => {
+    const containers = Object.values(template.findResources('AWS::ECS::TaskDefinition'))
+      .flatMap((td) => (td as { Properties: { ContainerDefinitions: Record<string, unknown>[] } }).Properties.ContainerDefinitions);
+    const notify = containers.find((c) => c.Name === 'notify-push');
+
+    test('config.php を読むため /var/www/html を読み取り専用でマウントする', () => {
+      expect(notify?.MountPoints).toEqual([{ ContainerPath: '/var/www/html', ReadOnly: true, SourceVolume: 'nextcloud-html' }]);
+    });
+
+    test('DB / Redis の資格情報を渡さない（config.php から読む）', () => {
+      expect(notify?.Secrets).toBeUndefined();
+      const names = (notify?.Environment as { Name: string }[]).map((e) => e.Name);
+      expect(names).not.toContain('POSTGRES_PASSWORD');
+      expect(names).not.toContain('REDIS_HOST');
+      expect(names).toContain('NEXTCLOUD_HOST');
+    });
+  });
+
+  describe('Nextcloud container health check', () => {
+    test('php-fpm の待受を見る実ヘルスチェック（exit 0 固定ではない）', () => {
+      const taskDefs = template.findResources('AWS::ECS::TaskDefinition');
+      const nextcloud = Object.values(taskDefs)
+        .flatMap((td) => (td as { Properties: { ContainerDefinitions: { Name: string; HealthCheck: Record<string, unknown> }[] } }).Properties.ContainerDefinitions)
+        .find((c) => c.Name === 'nextcloud');
+      expect(nextcloud?.HealthCheck).toEqual({
+        Command: ['CMD-SHELL', '/aws-healthcheck.sh'],
+        Interval: 120,
+        Timeout: 10,
+        Retries: 10,
+        StartPeriod: 300,
+      });
     });
   });
 

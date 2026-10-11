@@ -11,8 +11,8 @@ export interface StackConfig {
   /** Tag of the AIO images (apache, onlyoffice, imaginary, talk). */
   readonly aioImageTag: string;
   /**
-   * Tag of the notify-push image. Kept separate because notify-push changed its
-   * startup contract upstream in 2026-01 (reads config.php from /var/www/html).
+   * Tag of the notify-push image (defaults to {@link aioImageTag}).
+   * Kept as a separate parameter so notify-push can be pinned independently.
    */
   readonly aioNotifyPushImageTag: string;
   readonly nextcloudImageUri: string;
@@ -134,7 +134,7 @@ export function loadStackConfig(scope: Construct): StackConfig {
     hostedZoneId: contextString(scope, 'hostedZoneId', ''),
     hostedZoneName: contextString(scope, 'hostedZoneName', ''),
     aioImageTag,
-    aioNotifyPushImageTag: contextString(scope, 'aioNotifyPushImageTag', '20260218_123804'),
+    aioNotifyPushImageTag: contextString(scope, 'aioNotifyPushImageTag', aioImageTag),
     nextcloudImageUri: contextString(scope, 'nextcloudImageUri', `ghcr.io/nextcloud-releases/aio-nextcloud:${aioImageTag}`),
     apachePort: contextNumber(scope, 'apachePort', 11000),
     enableOnlyOffice: contextFlag(scope, 'enableOnlyOffice'),

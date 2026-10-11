@@ -1,11 +1,9 @@
 import * as cdk from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
-import * as elasticache from 'aws-cdk-lib/aws-elasticache';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
-import * as rds from 'aws-cdk-lib/aws-rds';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as route53targets from 'aws-cdk-lib/aws-route53-targets';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
@@ -23,15 +21,6 @@ export interface TaskCommon {
   readonly taskRole: iam.IRole;
   readonly executionRole: iam.IRole;
   readonly logGroup: logs.ILogGroup;
-}
-
-/**
- * Inputs of {@link buildNotifyPushService}.
- */
-export interface NotifyPushProps {
-  readonly dbCluster: rds.IDatabaseCluster;
-  readonly dbSecret: secretsmanager.ISecret;
-  readonly cache: elasticache.CfnServerlessCache;
 }
 
 /**
@@ -140,11 +129,17 @@ export function buildApacheTask(
 /**
  * Create the notify-push task definition.
  *
+ * The AIO image (2026-01 and later) runs
+ * `notify_push --port 7867 /var/www/html/config/config.php`: database, Redis
+ * and the Nextcloud URL are read from the main config.php. Its literal
+ * `redis.cluster` entry (TLS seeds) makes notify_push use a cluster-mode
+ * client, which ElastiCache Serverless requires. No database or Redis
+ * credentials are passed to the container.
+ *
  * @param scope - Stack the resources belong to.
  * @param config - Deployment parameters.
  * @param common - Roles and log group.
  * @param files - EFS file system and access points.
- * @param props - Database and cache endpoints.
  * @returns Task definition.
  */
 export function buildNotifyPushTask(
@@ -152,7 +147,6 @@ export function buildNotifyPushTask(
   config: StackConfig,
   common: TaskCommon,
   files: FileSystemResources,
-  props: NotifyPushProps,
 ): ecs.FargateTaskDefinition {
   const td = new ecs.FargateTaskDefinition(scope, 'NotifyPushTd', {
     cpu: 256, memoryLimitMiB: 512,
@@ -165,21 +159,13 @@ export function buildNotifyPushTask(
     portMappings: [{ containerPort: 7867 }],
     healthCheck: placeholderHealthCheck(30, 3, 60),
     environment: {
+      // start.sh waits for <NEXTCLOUD_HOST>:9001 before starting
       NEXTCLOUD_HOST: 'nextcloud-aio-nextcloud.nextcloud.local',
-      NC_DOMAIN: config.domain,
-      POSTGRES_HOST: props.dbCluster.clusterEndpoint.hostname,
-      POSTGRES_PORT: '5432',
-      POSTGRES_DB: 'nextcloud_database',
-      POSTGRES_USER: 'nextcloud',
-      REDIS_HOST: props.cache.attrEndpointAddress,
-      REDIS_HOST_PORT: props.cache.attrEndpointPort,
+      AIO_LOG_LEVEL: 'warn',
       TZ: 'Asia/Tokyo',
     },
-    secrets: {
-      POSTGRES_PASSWORD: ecs.Secret.fromSecretsManager(props.dbSecret, 'password'),
-    },
   });
-  container.addMountPoints({ sourceVolume: 'nextcloud-html', containerPath: '/nextcloud', readOnly: true });
+  container.addMountPoints({ sourceVolume: 'nextcloud-html', containerPath: '/var/www/html', readOnly: true });
   return td;
 }
 

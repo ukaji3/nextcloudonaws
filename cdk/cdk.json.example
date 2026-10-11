@@ -8,7 +8,6 @@
     "domain": "cloud.example.com",
     "certificateArn": "",
     "aioImageTag": "20260929_105435",
-    "aioNotifyPushImageTag": "20260218_123804",
     "nextcloudImageUri": "",
     "apachePort": 11000,
     "enableOnlyOffice": "true",

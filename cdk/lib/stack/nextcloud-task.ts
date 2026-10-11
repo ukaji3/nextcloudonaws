@@ -220,11 +220,18 @@ export function buildNextcloudTask(scope: Construct, props: NextcloudTaskProps):
     image: ecs.ContainerImage.fromRegistry(props.config.nextcloudImageUri),
     logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'nextcloud', logGroup: props.logGroup }),
     portMappings: [{ containerPort: 9000 }, { containerPort: 9001 }],
+    // Ready = php-fpm accepts connections (see containers/nextcloud/aws-healthcheck.sh).
+    // ECS keeps the old task (minimumHealthyPercent rounds 1 x 50% up to 1) and
+    // Cloud Map keeps routing to it until the new task is HEALTHY.
+    // Timing: startup without maintenance took 4.9-6.2 min (2026-09/10 logs);
+    // install/upgrade phases report healthy themselves, so the 25 min until
+    // UNHEALTHY (300 s start period + 10 x 120 s) only applies to a stuck startup.
     healthCheck: {
-      command: ['CMD-SHELL', 'exit 0'],
-      interval: cdk.Duration.seconds(30),
-      timeout: cdk.Duration.seconds(5),
-      retries: 3,
+      command: ['CMD-SHELL', '/aws-healthcheck.sh'],
+      interval: cdk.Duration.seconds(120),
+      timeout: cdk.Duration.seconds(10),
+      retries: 10,
+      startPeriod: cdk.Duration.seconds(300),
     },
     secrets: nextcloudSecrets(props),
     environment: nextcloudEnvironment(props),

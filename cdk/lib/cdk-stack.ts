@@ -109,7 +109,7 @@ export class NextcloudAioStack extends cdk.Stack {
     const apacheSvc = createFargateService(ctx, 'apache', apacheTd, { desiredCount: SERVICE_BASELINE.apache, minCapacity: 2, maxCapacity: 5 });
     apacheSvc.node.addDependency(nextcloudSvc);
 
-    const notifyTd = buildNotifyPushTask(this, config, common, files, { dbCluster, dbSecret, cache });
+    const notifyTd = buildNotifyPushTask(this, config, common, files);
     const notifySvc = createFargateService(ctx, 'notify-push', notifyTd, { desiredCount: SERVICE_BASELINE.notifyPush });
     notifySvc.node.addDependency(nextcloudSvc);
 
