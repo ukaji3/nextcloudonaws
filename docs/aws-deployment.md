@@ -633,13 +633,22 @@ ALB に AWS WAF（リージョナル）の Web ACL を関連付け、`wafAllowed
 
 ### 7.4 Talk 用 NLB (オプション)
 
-Talk の TURN サーバーは UDP を使用するため、NLB が必要:
+Talk の TURN/STUN（eturnal）は UDP を使用するため、NLB が必要:
 
 ```
 スキーム:           internet-facing
-リスナー:           TCP/UDP:3478
-ターゲットグループ:  Talk ECS Service (ポート 3478)
+リスナー:           TCP_UDP:3478
+ターゲット:          Talk タスクの talk コンテナ 3478（ヘルスチェックは TCP 8081）
+DNS:                turn.<domain>（ホストゾーン指定時。未指定なら NLB の DNS 名）
+送信元 IP:          NLB は利用者の IP をそのまま Talk タスクに渡す（Talk の SG は 3478 を全世界に許可）
 ```
+
+利用者に配る TURN/STUN の宛先（`TURN_DOMAIN`）は `turn.<domain>` で、Nextcloud（`occ talk:turn:list` / `talk:stun:list`）と Talk コンテナ内の Janus（`turn_server`）の両方に渡す。
+
+- ECS はサービスのコンテナのうち最初のポート（8081 = シグナリング）をターゲットに登録するため、CDK で `talk` コンテナの 3478 を明示している
+- ECS は1つのコンテナで同じポート番号を TCP と UDP の両方で定義できない（"Container port 3478 is used in more than one port mapping" で失敗する）。そのため `talk` コンテナのポート定義は 8081/TCP と 3478/TCP だけにしている。awsvpc ではポート定義が通信を制限しないので、UDP 3478 も届く（SG と NLB の TCP_UDP リスナーで制御）。jest で「同じポート番号の重複なし」「LB 登録ポートがポート定義にちょうど1つある」を検査している
+- 以前のバージョンは `TURN_DOMAIN` に `<domain>`（ALB、3478 の待受なし）を渡しており、外部から TURN/STUN に到達できなかった。起動時に `aws-talk-servers.sh` が、この古い登録（`<domain>:3478`）を新しい登録の存在を確認したうえで削除する（管理者が追加したサーバーは削除しない。テスト: `tests/test-aws-talk-servers.sh`）
+- 疎通確認: `python3 tools/stun_probe.py turn.<domain>` を実行し、UDP と TCP の両方で `BINDING SUCCESS mapped=<自分のグローバル IP>:<port>` が返ること（STUN Binding Request を送るだけの依存なしスクリプト）
 
 ---
 

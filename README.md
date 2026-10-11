@@ -44,6 +44,7 @@ docs/                    デプロイメントガイド
 | `containers/nextcloud/aws-custom-apps-repair.sh` | 独自追加。EFS 上でアプリ更新後に生じる入れ子ディレクトリの修復ライブラリ（テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/aws-healthcheck.sh` | 独自追加。ECS 用ヘルスチェック（php-fpm の待受で正常、インストール・アップグレード中は保護。テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/aws-trusted-proxies.sh` | 独自追加。NAT Gateway の EIP（`AWS_TRUSTED_PROXIES`）を `trusted_proxies` 20〜29 番に設定（notify_push 用。テスト: `containers/nextcloud/tests/`） |
+| `containers/nextcloud/aws-talk-servers.sh` | 独自追加。以前の版が登録した誤った TURN/STUN（`<domain>:3478`）を、正しい `turn.<domain>:3478` の登録後に削除（テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/diag.php` | 独自追加（Redis 接続診断。外部からは 404） |
 
 同期状況: Nextcloud 34.0.4 / PHP 8.4.26 / dinit。upstream AIO main `da7cf9d7`（2026-10-08）に同期済みで、上表以外のファイル（start.sh・notify*.sh・dinit.d/・config/ の大半など）は upstream と同一。以前の redis-patch.php（Redis.php の全置換）は、Nextcloud 33.0.7 以降の公式実装が SCAN + UNLINK に変わったため撤去した。
@@ -82,7 +83,14 @@ npx cdk deploy
 ```bash
 cd cdk
 npm run lint && npx tsc --noEmit && npm test && npx cdk diff
-bash ../containers/nextcloud/tests/test-aws-custom-apps-repair.sh
+cd .. && for t in containers/nextcloud/tests/*.sh; do bash "$t"; done   # php が必要なテストは php が無ければ SKIP
+ruff check --select E,W,F,I,B,UP,N,C90 tools && mypy --strict tools
+```
+
+デプロイ後の Talk（TURN/STUN）疎通確認:
+
+```bash
+python3 tools/stun_probe.py turn.<domain>   # UDP と TCP の両方で BINDING SUCCESS になること
 ```
 
 ## バージョンアップ

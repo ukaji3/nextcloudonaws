@@ -44,6 +44,8 @@ interface OptionalServicesInput {
   readonly featureSecrets: FeatureSecrets;
   readonly onlyofficeSecret: secretsmanager.ISecret;
   readonly hostedZone?: route53.IHostedZone;
+  /** TURN/STUN host for clients (see the constructor). */
+  readonly turnDomain: string;
 }
 
 /**
@@ -98,9 +100,17 @@ export class NextcloudAioStack extends cdk.Stack {
     const { logGroup, auditFn } = buildLogging(this);
     const common: TaskCommon = { taskRole, executionRole, logGroup };
 
+    // TURN/STUN host handed to clients. With a hosted zone it is turn.<domain>
+    // (alias to the Talk NLB); otherwise the NLB DNS name, which only exists
+    // once Talk is built, hence the lazy value.
+    const talkNlb: { dnsName?: string } = {};
+    const turnDomain = hostedZone
+      ? `turn.${config.domain}`
+      : cdk.Lazy.string({ produce: () => talkNlb.dnsName ?? config.domain });
+
     const nextcloud = buildNextcloudTask(this, {
       config, taskRole, executionRole, logGroup, files, bucket, dbCluster, dbSecret, cache,
-      adminSecret, onlyofficeSecret, featureSecrets, osDomain, trustedProxies: network.natPublicIps,
+      adminSecret, onlyofficeSecret, featureSecrets, osDomain, trustedProxies: network.natPublicIps, turnDomain,
     });
     // nextcloud / apache / notify-push: the upgrade state machine owns their
     // desired count (scale to 0, restore SERVICE_BASELINE), so CloudFormation
@@ -122,8 +132,9 @@ export class NextcloudAioStack extends cdk.Stack {
     notifySvc.node.addDependency(nextcloudSvc);
 
     const optional = this.buildOptionalServices({
-      config, ctx, common, files, network, featureSecrets, onlyofficeSecret, hostedZone,
+      config, ctx, common, files, network, featureSecrets, onlyofficeSecret, hostedZone, turnDomain,
     });
+    talkNlb.dnsName = optional.talkNlb?.loadBalancerDnsName;
 
     const { alb, apacheTargetGroup } = buildLoadBalancer(this, config, {
       vpc: network.vpc, albSg: network.albSg, accessLogBucket, apacheService: apacheSvc, hostedZone,
@@ -222,6 +233,7 @@ export class NextcloudAioStack extends cdk.Stack {
         talkSecret: s.talkSecret,
         signalingSecret: s.signalingSecret,
         talkInternalSecret: s.talkInternalSecret,
+        turnDomain: input.turnDomain,
       });
       taskDefinitions.push(talk.taskDefinition);
       talkNlb = talk.nlb;

@@ -197,6 +197,66 @@ describe('NextcloudAioStack', () => {
     });
   });
 
+  describe('ECS port mapping constraints (checked before deploy)', () => {
+    interface Container { Name: string; PortMappings?: { ContainerPort: number; Protocol?: string }[] }
+    const taskDefs = template.findResources('AWS::ECS::TaskDefinition');
+    const containers: Container[] = Object.values(taskDefs)
+      .flatMap((td) => (td as { Properties: { ContainerDefinitions: Container[] } }).Properties.ContainerDefinitions);
+
+    test('どのコンテナも同じポート番号を複数のプロトコルで公開しない', () => {
+      for (const c of containers) {
+        const ports = (c.PortMappings ?? []).map((p) => p.ContainerPort);
+        expect({ container: c.Name, duplicates: ports.filter((p, i) => ports.indexOf(p) !== i) })
+          .toEqual({ container: c.Name, duplicates: [] });
+      }
+    });
+
+    test('LB に登録するポートはそのコンテナのポート定義にちょうど1つある', () => {
+      const services = template.findResources('AWS::ECS::Service');
+      for (const svc of Object.values(services)) {
+        const lbs = (svc as { Properties: { LoadBalancers?: { ContainerName: string; ContainerPort: number }[] } }).Properties.LoadBalancers ?? [];
+        for (const lb of lbs) {
+          const c = containers.find((x) => x.Name === lb.ContainerName);
+          const matches = (c?.PortMappings ?? []).filter((p) => p.ContainerPort === lb.ContainerPort);
+          expect({ container: lb.ContainerName, port: lb.ContainerPort, matches: matches.length })
+            .toEqual({ container: lb.ContainerName, port: lb.ContainerPort, matches: 1 });
+        }
+      }
+    });
+  });
+
+  describe('Talk TURN', () => {
+    const containers = Object.values(template.findResources('AWS::ECS::TaskDefinition'))
+      .flatMap((td) => (td as { Properties: { ContainerDefinitions: { Name: string; Environment: { Name: string; Value: unknown }[] }[] } }).Properties.ContainerDefinitions);
+    const env = (container: string, name: string): unknown =>
+      containers.find((c) => c.Name === container)?.Environment.find((e) => e.Name === name)?.Value;
+
+    test('NLB は Talk コンテナの 3478 に転送する（8081 回帰）', () => {
+      const services = template.findResources('AWS::ECS::Service');
+      const talk = Object.entries(services).find(([id]) => id.startsWith('TalkService'));
+      const lbs = (talk?.[1] as { Properties: { LoadBalancers: { ContainerName: string; ContainerPort: number }[] } }).Properties.LoadBalancers;
+      expect(lbs).toEqual([expect.objectContaining({ ContainerName: 'talk', ContainerPort: 3478 })]);
+    });
+
+    test('Nextcloud と Talk に TURN_DOMAIN=turn.<domain> を渡す（ALB を指さない）', () => {
+      expect(env('nextcloud', 'TURN_DOMAIN')).toBe('turn.cloud.example.com');
+      expect(env('talk', 'TURN_DOMAIN')).toBe('turn.cloud.example.com');
+    });
+
+    test('ホストゾーンが無い場合は NLB の DNS 名を使う', () => {
+      const app = new cdk.App({ context: { ...testContext, hostedZoneId: '', hostedZoneName: '', certificateArn: 'arn:aws:acm:us-east-1:111122223333:certificate/x' } });
+      const stack = new NextcloudAioStack(app, 'NoZoneStack', { env: { account: '111122223333', region: 'us-east-1' } });
+      const t = Template.fromStack(stack);
+      const nlbId = Object.keys(t.findResources('AWS::ElasticLoadBalancingV2::LoadBalancer')).find((id) => id.startsWith('TalkNlb'));
+      const cs = Object.values(t.findResources('AWS::ECS::TaskDefinition'))
+        .flatMap((td) => (td as { Properties: { ContainerDefinitions: { Name: string; Environment: { Name: string; Value: unknown }[] }[] } }).Properties.ContainerDefinitions);
+      for (const name of ['nextcloud', 'talk']) {
+        const value = cs.find((c) => c.Name === name)?.Environment.find((e) => e.Name === 'TURN_DOMAIN')?.Value;
+        expect(value).toEqual({ 'Fn::GetAtt': [nlbId, 'DNSName'] });
+      }
+    });
+  });
+
   describe('Nextcloud container health check', () => {
     test('php-fpm の待受を見る実ヘルスチェック（exit 0 固定ではない）', () => {
       const taskDefs = template.findResources('AWS::ECS::TaskDefinition');

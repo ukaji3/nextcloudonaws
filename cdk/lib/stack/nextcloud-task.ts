@@ -32,6 +32,8 @@ export interface NextcloudTaskProps {
   readonly osDomain?: opensearch.IDomain;
   /** Extra trusted proxies (NAT Gateway public IPs), see aws-trusted-proxies.sh. */
   readonly trustedProxies: readonly string[];
+  /** TURN/STUN host for clients: turn.<domain> (Talk NLB alias) or the NLB DNS name. */
+  readonly turnDomain: string;
 }
 
 /**
@@ -105,21 +107,22 @@ function yesNo(enabled: boolean): string {
 /**
  * Office, Talk, antivirus and preview integrations.
  *
- * TURN_DOMAIN is the Nextcloud domain. (The original stack intended to use the
- * Talk NLB name here, but assigned it only after this container was defined,
- * so the effective value has always been the domain.)
+ * TURN_DOMAIN is the host clients use for TURN/STUN (the Talk NLB, see
+ * {@link NextcloudTaskProps.turnDomain}). It used to be the Nextcloud domain,
+ * i.e. the ALB, which has no 3478 listener.
  *
  * @param config - Deployment parameters.
+ * @param turnDomain - TURN/STUN host.
  * @returns Environment entries.
  */
-function integrationEnvironment(config: StackConfig): Environment {
+function integrationEnvironment(config: StackConfig, turnDomain: string): Environment {
   return {
     ONLYOFFICE_ENABLED: yesNo(config.enableOnlyOffice),
     ONLYOFFICE_HOST: 'nextcloud-aio-onlyoffice.nextcloud.local',
     TALK_ENABLED: yesNo(config.enableTalk),
     TALK_HOST: 'nextcloud-aio-talk.nextcloud.local',
     TALK_PORT: '3478',
-    TURN_DOMAIN: config.domain,
+    TURN_DOMAIN: turnDomain,
     COLLABORA_ENABLED: 'no',
     CLAMAV_ENABLED: yesNo(config.enableClamav),
     IMAGINARY_ENABLED: yesNo(config.enableImaginary),
@@ -177,7 +180,7 @@ function nextcloudEnvironment(props: NextcloudTaskProps): Environment {
   return {
     ...dataEnvironment(props),
     ...coreEnvironment(props),
-    ...integrationEnvironment(props.config),
+    ...integrationEnvironment(props.config, props.turnDomain),
     ...fulltextsearchEnvironment(props.config, props.osDomain),
     ...appsEnvironment(),
     // Space-separated; resolved by CloudFormation to the NAT Gateway public IPs.

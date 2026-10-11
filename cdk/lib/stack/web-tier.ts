@@ -36,6 +36,8 @@ export interface TalkProps {
   readonly talkSecret: secretsmanager.ISecret;
   readonly signalingSecret: secretsmanager.ISecret;
   readonly talkInternalSecret: secretsmanager.ISecret;
+  /** TURN host Janus hands out to clients (same value as Nextcloud's TURN_DOMAIN). */
+  readonly turnDomain: string;
 }
 
 /**
@@ -264,16 +266,23 @@ function buildTalkTask(scope: Construct, config: StackConfig, common: TaskCommon
   td.addContainer('talk', {
     image: aioImage('talk', config.aioImageTag),
     logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'talk', logGroup: common.logGroup }),
+    // ECS cannot expose one container port for two protocols (API PortMapping:
+    // "You can't expose the same container port for multiple protocols"; a service
+    // registering such a port with a load balancer fails with "Container port 3478
+    // is used in more than one port mapping"). In awsvpc mode the mappings do not
+    // filter traffic, so UDP 3478 still reaches eturnal; access is controlled by
+    // the security group and the NLB TCP_UDP listener.
     portMappings: [
       { containerPort: 8081, protocol: ecs.Protocol.TCP },
       { containerPort: 3478, protocol: ecs.Protocol.TCP },
-      { containerPort: 3478, protocol: ecs.Protocol.UDP },
     ],
     healthCheck: placeholderHealthCheck(5, 3),
     environment: {
       NC_DOMAIN: config.domain,
       TALK_HOST: 'nextcloud-aio-talk.nextcloud.local',
       TALK_PORT: '3478',
+      // Janus turn_server; without it start.sh falls back to NC_DOMAIN (the ALB, no 3478 listener)
+      TURN_DOMAIN: props.turnDomain,
       TZ: 'Asia/Tokyo',
     },
     secrets: {
@@ -310,7 +319,10 @@ function buildTurnLoadBalancer(
     .addTargets('TurnTarget', {
       port: 3478,
       protocol: elbv2.Protocol.TCP_UDP,
-      targets: [talkSvc],
+      // Register the task's 3478 (TCP_UDP target group, ip targets). Without an
+      // explicit container port ECS registers the first mapping, 8081 (signaling).
+      // Health is still checked on 8081.
+      targets: [talkSvc.loadBalancerTarget({ containerName: 'talk', containerPort: 3478 })],
       healthCheck: { protocol: elbv2.Protocol.TCP, port: '8081' },
     });
   new cdk.CfnOutput(scope, 'TalkNlbDns', { value: nlb.loadBalancerDnsName });

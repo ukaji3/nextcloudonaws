@@ -999,6 +999,13 @@ if [ "$TALK_ENABLED" = 'yes' ]; then
     if ! php /var/www/html/occ talk:signaling:list --output="plain" | grep -q "https://$TALK_HOST$HPB_PATH"; then
         php /var/www/html/occ talk:signaling:add "https://$TALK_HOST$HPB_PATH" "$SIGNALING_SECRET" --verify
     fi
+    # --- AWS deployment customizations start (nextcloudonaws) ---
+    # Earlier versions registered "$NC_DOMAIN:$TALK_PORT" (the ALB, no 3478 listener)
+    # as TURN/STUN server. Remove it now that "$TURN_DOMAIN:$TALK_PORT" (the Talk NLB) exists.
+    # shellcheck source=aws-talk-servers.sh
+    . /aws-talk-servers.sh
+    aws_remove_stale_talk_server "$NC_DOMAIN:$TALK_PORT" "$TURN_DOMAIN:$TALK_PORT"
+    # --- AWS deployment customizations end (nextcloudonaws) ---
 else
     if [ "$REMOVE_DISABLED_APPS" = yes ] && [ -d "/var/www/html/custom_apps/spreed" ]; then
         php /var/www/html/occ app:remove spreed
