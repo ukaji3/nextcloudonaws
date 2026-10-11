@@ -1,1411 +1,230 @@
 import * as cdk from 'aws-cdk-lib';
-import { Construct } from 'constructs';
-import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
-import * as efs from 'aws-cdk-lib/aws-efs';
-import * as rds from 'aws-cdk-lib/aws-rds';
-import * as s3 from 'aws-cdk-lib/aws-s3';
-import * as elasticache from 'aws-cdk-lib/aws-elasticache';
-import * as opensearch from 'aws-cdk-lib/aws-opensearchservice';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
-import * as servicediscovery from 'aws-cdk-lib/aws-servicediscovery';
-import * as iam from 'aws-cdk-lib/aws-iam';
-import * as logs from 'aws-cdk-lib/aws-logs';
-import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as route53 from 'aws-cdk-lib/aws-route53';
-import * as route53targets from 'aws-cdk-lib/aws-route53-targets';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
-import * as appscaling from 'aws-cdk-lib/aws-applicationautoscaling';
+import * as servicediscovery from 'aws-cdk-lib/aws-servicediscovery';
+import { Construct } from 'constructs';
+import { DataBackup } from './constructs/data-backup';
+import { ImageScanning } from './constructs/image-scanning';
+import { loadStackConfig, StackConfig } from './stack/config';
+import { buildCache, buildDatabase } from './stack/database';
+import { buildFeatureSecrets, buildSearchDomain, FeatureSecrets } from './stack/feature-secrets';
+import { buildLogging, buildTaskRoles } from './stack/iam-and-logging';
+import { buildDnsRecord, buildLoadBalancer } from './stack/load-balancer';
+import { buildAlarms, buildDashboard, buildErrorMetric } from './stack/monitoring';
+import { applyNagSuppressions } from './stack/nag-suppressions';
+import { buildNetwork, NetworkResources } from './stack/network';
+import { buildNextcloudTask } from './stack/nextcloud-task';
+import { createFargateService, ServiceBaselineCounts, ServiceContext } from './stack/service-factory';
+import { buildBuckets, buildFileSystem, FileSystemResources } from './stack/storage';
+import { buildUpgradeStateMachine } from './stack/upgrade-state-machine';
+import {
+  buildApacheTask,
+  buildImaginaryService,
+  buildNotifyPushTask,
+  buildOnlyOfficeService,
+  buildTalkService,
+  TaskCommon,
+} from './stack/web-tier';
 
-import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
-import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
-import * as sqs from 'aws-cdk-lib/aws-sqs';
-import * as ecr from 'aws-cdk-lib/aws-ecr';
-import * as kms from 'aws-cdk-lib/aws-kms';
-import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
-import * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as logs_destinations from 'aws-cdk-lib/aws-logs-destinations';
-import { NagSuppressions } from 'cdk-nag';
+/** Normal-operation desired counts (shared with the upgrade state machine). */
+const SERVICE_BASELINE: ServiceBaselineCounts = { nextcloud: 1, apache: 2, notifyPush: 1 };
 
 /**
- * 通常運用時の各 ECS サービスの desired count。
- * サービス定義とアップグレード State Machine のロールバックで共有し、値の乖離を防ぐ。
+ * Inputs of the optional services (OnlyOffice, Imaginary, Talk).
  */
-interface ServiceBaselineCounts {
-  readonly nextcloud: number;
-  readonly apache: number;
-  readonly notifyPush: number;
+interface OptionalServicesInput {
+  readonly config: StackConfig;
+  readonly ctx: ServiceContext;
+  readonly common: TaskCommon;
+  readonly files: FileSystemResources;
+  readonly network: NetworkResources;
+  readonly featureSecrets: FeatureSecrets;
+  readonly onlyofficeSecret: secretsmanager.ISecret;
+  readonly hostedZone?: route53.IHostedZone;
 }
 
 /**
- * アップグレード State Machine の1ステップ（実行タスク + ExitCode 検査）のチェーン端点。
+ * Optional resources created by {@link NextcloudAioStack.buildOptionalServices}.
  */
-interface UpgradeStepChain {
-  readonly entry: sfn.IChainable;
-  readonly exit: sfn.INextable;
+interface OptionalServices {
+  readonly taskDefinitions: ecs.TaskDefinition[];
+  readonly talkNlb?: elbv2.NetworkLoadBalancer;
 }
 
+/**
+ * Nextcloud on AWS: ECS Fargate (AIO containers) with Aurora Serverless v2,
+ * ElastiCache Serverless, S3, EFS and optional OpenSearch / OnlyOffice /
+ * Imaginary / Talk. Every resource is created by the builders in ./stack and
+ * ./constructs with this stack as scope, so logical IDs stay stable.
+ */
 export class NextcloudAioStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+  /**
+   * @param scope - Parent construct.
+   * @param id - Stack id.
+   * @param props - Stack properties.
+   */
+  public constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // --- Context Parameters ---
-    const domain = this.node.tryGetContext('domain') || 'cloud.example.com';
-    const certificateArn = this.node.tryGetContext('certificateArn') || '';
-    const hostedZoneId = this.node.tryGetContext('hostedZoneId') || '';
-    const hostedZoneName = this.node.tryGetContext('hostedZoneName') || '';
-    const hostedZone = hostedZoneId && hostedZoneName
-      ? route53.HostedZone.fromHostedZoneAttributes(this, 'Zone', { hostedZoneId, zoneName: hostedZoneName })
-      : undefined;
-    const aioImageTag = this.node.tryGetContext('aioImageTag') || '20260218_123804';
-    const nextcloudImageUri = this.node.tryGetContext('nextcloudImageUri') || `ghcr.io/nextcloud-releases/aio-nextcloud:${aioImageTag}`;
-    const apachePort = this.node.tryGetContext('apachePort') || 11000;
-    const enableOnlyOffice = this.node.tryGetContext('enableOnlyOffice') === 'true';
-    const enableTalk = this.node.tryGetContext('enableTalk') === 'true';
-    const enableFulltextsearch = this.node.tryGetContext('enableFulltextsearch') === 'true';
-    const enableImaginary = this.node.tryGetContext('enableImaginary') === 'true';
-    const enableClamav = this.node.tryGetContext('enableClamav') === 'true';
-    const auroraMinAcu = this.node.tryGetContext('auroraMinAcu') || 0.5;
-    const auroraMaxAcu = this.node.tryGetContext('auroraMaxAcu') || 16;
+    const config = loadStackConfig(this);
+    const hostedZone = this.resolveHostedZone(config);
 
-    // ========================================
-    // 1. VPC
-    // ========================================
-    const vpc = new ec2.Vpc(this, 'Vpc', {
-      maxAzs: 2,
-      subnetConfiguration: [
-        { name: 'Public', subnetType: ec2.SubnetType.PUBLIC, cidrMask: 24 },
-        { name: 'Private', subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS, cidrMask: 24 },
-        { name: 'Isolated', subnetType: ec2.SubnetType.PRIVATE_ISOLATED, cidrMask: 24 },
-      ],
+    const network = buildNetwork(this, config.apachePort);
+    const files = buildFileSystem(this, network.vpc, network.efsSg);
+    const { dbSecret, dbCluster } = buildDatabase(this, {
+      vpc: network.vpc,
+      dbSg: network.dbSg,
+      minAcu: config.auroraMinAcu,
+      maxAcu: config.auroraMaxAcu,
+      backupRetentionDays: config.auroraBackupRetentionDays,
+    });
+    const { cacheSecret, cache } = buildCache(this, network.vpc, network.cacheSg);
+    const { accessLogBucket, bucket } = buildBuckets(this);
+    const featureSecrets = buildFeatureSecrets(this, {
+      fulltextsearch: config.enableFulltextsearch,
+      imaginary: config.enableImaginary,
+      talk: config.enableTalk,
+    });
+    const osDomain = buildSearchDomain(this, { vpc: network.vpc, ecsSg: network.ecsSg, osSecret: featureSecrets.osSecret });
+
+    const cluster = new ecs.Cluster(this, 'Cluster', { vpc: network.vpc, containerInsights: true });
+    const namespace = new servicediscovery.PrivateDnsNamespace(this, 'Namespace', { name: 'nextcloud.local', vpc: network.vpc });
+    const ctx: ServiceContext = { scope: this, cluster, namespace, ecsSg: network.ecsSg };
+
+    const { taskRole, executionRole, adminSecret, onlyofficeSecret } = buildTaskRoles(this, { bucket, dbSecret, cacheSecret, featureSecrets });
+    const { logGroup, auditFn } = buildLogging(this);
+    const common: TaskCommon = { taskRole, executionRole, logGroup };
+
+    const nextcloud = buildNextcloudTask(this, {
+      config, taskRole, executionRole, logGroup, files, bucket, dbCluster, dbSecret, cache,
+      adminSecret, onlyofficeSecret, featureSecrets, osDomain,
+    });
+    const nextcloudSvc = createFargateService(ctx, 'nextcloud', nextcloud.taskDefinition, {
+      desiredCount: SERVICE_BASELINE.nextcloud, minCapacity: 1, maxCapacity: 10,
     });
 
-    vpc.addFlowLog('FlowLog', {
-      destination: ec2.FlowLogDestination.toCloudWatchLogs(
-        new logs.LogGroup(this, 'VpcFlowLogGroup', { retention: logs.RetentionDays.ONE_MONTH }),
-      ),
-    });
-
-    // ========================================
-    // 2. Security Groups
-    // ========================================
-    const albSg = new ec2.SecurityGroup(this, 'AlbSg', { vpc, description: 'ALB' });
-    albSg.addIngressRule(ec2.Peer.ipv4('153.242.166.137/32'), ec2.Port.tcp(443));
-
-    const ecsSg = new ec2.SecurityGroup(this, 'EcsSg', { vpc, description: 'ECS Tasks' });
-    ecsSg.addIngressRule(albSg, ec2.Port.tcp(apachePort));
-    ecsSg.addIngressRule(ecsSg, ec2.Port.allTcp()); // inter-service
-
-    const dbSg = new ec2.SecurityGroup(this, 'DbSg', { vpc, description: 'Aurora' });
-    dbSg.addIngressRule(ecsSg, ec2.Port.tcp(5432));
-
-    const cacheSg = new ec2.SecurityGroup(this, 'CacheSg', { vpc, description: 'ElastiCache' });
-    cacheSg.addIngressRule(ecsSg, ec2.Port.tcp(6379));
-
-    const efsSg = new ec2.SecurityGroup(this, 'EfsSg', { vpc, description: 'EFS' });
-    efsSg.addIngressRule(ecsSg, ec2.Port.tcp(2049));
-
-    // ========================================
-    // 3. EFS
-    // ========================================
-    const fileSystem = new efs.FileSystem(this, 'Efs', {
-      vpc,
-      securityGroup: efsSg,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      performanceMode: efs.PerformanceMode.GENERAL_PURPOSE,
-      throughputMode: efs.ThroughputMode.ELASTIC,
-      encrypted: true,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    });
-
-    const apNextcloudHtml = fileSystem.addAccessPoint('NextcloudHtml', {
-      path: '/nextcloud-html',
-      posixUser: { uid: '33', gid: '33' },
-      createAcl: { ownerUid: '33', ownerGid: '33', permissions: '755' },
-    });
-    const apApacheData = fileSystem.addAccessPoint('ApacheData', {
-      path: '/apache-data',
-      posixUser: { uid: '33', gid: '33' },
-      createAcl: { ownerUid: '33', ownerGid: '33', permissions: '755' },
-    });
-    const apNextcloudData = fileSystem.addAccessPoint('NextcloudData', {
-      path: '/nextcloud-data',
-      posixUser: { uid: '33', gid: '0' },
-      createAcl: { ownerUid: '33', ownerGid: '0', permissions: '750' },
-    });
-
-    // ========================================
-    // 4. Aurora Serverless v2
-    // ========================================
-    const dbSecret = new secretsmanager.Secret(this, 'DbSecret', {
-      generateSecretString: {
-        secretStringTemplate: JSON.stringify({ username: 'oc_nextcloud' }),
-        generateStringKey: 'password',
-        excludePunctuation: true,
-      },
-    });
-
-    const dbCluster = new rds.DatabaseCluster(this, 'AuroraCluster', {
-      engine: rds.DatabaseClusterEngine.auroraPostgres({
-        // 16.4 は deprecated（新規作成不可）。稼働クラスタは自動マイナー
-        // アップグレードで 16.11 のため、テンプレートを実機に一致させる。
-        version: rds.AuroraPostgresEngineVersion.VER_16_11,
-      }),
-      credentials: rds.Credentials.fromSecret(dbSecret),
-      defaultDatabaseName: 'nextcloud_database',
-      serverlessV2MinCapacity: auroraMinAcu,
-      serverlessV2MaxCapacity: auroraMaxAcu,
-      writer: rds.ClusterInstance.serverlessV2('Writer', {
-        enablePerformanceInsights: true,
-        performanceInsightRetention: rds.PerformanceInsightRetention.DEFAULT,
-      }),
-      vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
-      securityGroups: [dbSg],
-      storageEncrypted: true,
-      iamAuthentication: true,
-      monitoringInterval: cdk.Duration.seconds(60),
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    });
-
-    // ========================================
-    // 5. ElastiCache Serverless (Valkey)
-    // ========================================
-    const cacheSecret = new secretsmanager.Secret(this, 'CacheSecret', {
-      generateSecretString: { excludePunctuation: true, passwordLength: 32 },
-    });
-
-    const cache = new elasticache.CfnServerlessCache(this, 'ValkeyCache', {
-      engine: 'valkey',
-      serverlessCacheName: `${cdk.Names.uniqueId(this)}-cache`.substring(0, 40).toLowerCase(),
-      securityGroupIds: [cacheSg.securityGroupId],
-      subnetIds: vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }).subnetIds,
-    });
-
-    // ========================================
-    // 6. S3
-    // ========================================
-    const accessLogBucket = new s3.Bucket(this, 'AccessLogBucket', {
-      encryption: s3.BucketEncryption.S3_MANAGED,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      enforceSSL: true,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    });
-
-    const bucket = new s3.Bucket(this, 'DataBucket', {
-      encryption: s3.BucketEncryption.S3_MANAGED,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      versioned: true,
-      enforceSSL: true,
-      serverAccessLogsBucket: accessLogBucket,
-      serverAccessLogsPrefix: 'data-bucket/',
-      lifecycleRules: [{
-        transitions: [{
-          storageClass: s3.StorageClass.INTELLIGENT_TIERING,
-          transitionAfter: cdk.Duration.days(0),
-        }],
-        noncurrentVersionTransitions: [{
-          storageClass: s3.StorageClass.INTELLIGENT_TIERING,
-          transitionAfter: cdk.Duration.days(0),
-        }],
-      }],
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    });
-
-    // ========================================
-    // 7. OpenSearch Service (optional)
-    // ========================================
-    let osDomain: opensearch.Domain | undefined;
-    const osSecret = enableFulltextsearch ? new secretsmanager.Secret(this, 'OsSecret', {
-      generateSecretString: {
-        secretStringTemplate: JSON.stringify({ username: 'admin' }),
-        generateStringKey: 'password',
-        excludeCharacters: '&<>"\'/\\@#%{}|^~`[]',
-        includeSpace: false,
-        passwordLength: 32,
-        requireEachIncludedType: true,
-      },
-    }) : undefined;
-
-    // Imaginary + Talk secrets (declared early for Nextcloud container reference)
-    const imaginarySecret = enableImaginary ? new secretsmanager.Secret(this, 'ImaginarySecret', {
-      generateSecretString: { excludePunctuation: true, passwordLength: 32 },
-    }) : undefined;
-    const talkSecret = enableTalk ? new secretsmanager.Secret(this, 'TalkSecret', {
-      generateSecretString: { excludePunctuation: true, passwordLength: 32 },
-    }) : undefined;
-    const signalingSecret = enableTalk ? new secretsmanager.Secret(this, 'SignalingSecret', {
-      generateSecretString: { excludePunctuation: true, passwordLength: 32 },
-    }) : undefined;
-    const talkInternalSecret = enableTalk ? new secretsmanager.Secret(this, 'TalkInternalSecret', {
-      generateSecretString: { excludePunctuation: true, passwordLength: 32 },
-    }) : undefined;
-    let talkNlbDns = '';
-
-    if (enableFulltextsearch) {
-      const osSg = new ec2.SecurityGroup(this, 'OsSg', { vpc, description: 'OpenSearch' });
-      osSg.addIngressRule(ecsSg, ec2.Port.tcp(443));
-
-      osDomain = new opensearch.Domain(this, 'OsDomain', {
-        version: opensearch.EngineVersion.OPENSEARCH_2_17,
-        vpc,
-        vpcSubnets: [{ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }],
-        securityGroups: [osSg],
-        zoneAwareness: { enabled: true, availabilityZoneCount: 2 },
-        capacity: {
-          dataNodeInstanceType: 't3.medium.search',
-          dataNodes: 2,
-          multiAzWithStandbyEnabled: false,
-        },
-        ebs: { volumeSize: 20, volumeType: ec2.EbsDeviceVolumeType.GP3 },
-        nodeToNodeEncryption: true,
-        encryptionAtRest: { enabled: true },
-        enforceHttps: true,
-        fineGrainedAccessControl: {
-          masterUserName: 'admin',
-          masterUserPassword: osSecret!.secretValueFromJson('password'),
-        },
-        removalPolicy: cdk.RemovalPolicy.RETAIN,
-      });
-    }
-
-    // ========================================
-    // 8. ECS Cluster + Cloud Map
-    // ========================================
-    const cluster = new ecs.Cluster(this, 'Cluster', { vpc, containerInsights: true });
-
-    const namespace = new servicediscovery.PrivateDnsNamespace(this, 'Namespace', {
-      name: 'nextcloud.local',
-      vpc,
-    });
-
-    // ========================================
-    // 9. IAM - Task Roles
-    // ========================================
-    const taskRole = new iam.Role(this, 'TaskRole', {
-      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
-    });
-    bucket.grantReadWrite(taskRole);
-
-    const executionRole = new iam.Role(this, 'ExecRole', {
-      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
-      managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonECSTaskExecutionRolePolicy')],
-    });
-    dbSecret.grantRead(executionRole);
-    cacheSecret.grantRead(executionRole);
-    if (osSecret) osSecret.grantRead(executionRole);
-    const adminSecret = new secretsmanager.Secret(this, 'AdminSecret', {
-      generateSecretString: { excludePunctuation: false, passwordLength: 24 },
-    });
-    adminSecret.grantRead(executionRole);
-    const onlyofficeSecret = new secretsmanager.Secret(this, 'OnlyofficeSecret', {
-      generateSecretString: { excludePunctuation: true, passwordLength: 32 },
-    });
-    onlyofficeSecret.grantRead(executionRole);
-    if (imaginarySecret) imaginarySecret.grantRead(executionRole);
-
-    // ========================================
-    // 10. Log Groups
-    // ========================================
-    const logGroup = new logs.LogGroup(this, 'EcsLogs', {
-      retention: logs.RetentionDays.ONE_MONTH,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-    });
-
-    // Audit log: separate log group with 365-day retention
-    const auditLogGroup = new logs.LogGroup(this, 'AuditLogs', {
-      retention: logs.RetentionDays.ONE_YEAR,
-    });
-
-    const auditFn = new lambda.Function(this, 'AuditLogForwarder', {
-      runtime: lambda.Runtime.PYTHON_3_14,
-      handler: 'index.handler',
-      code: lambda.Code.fromInline(`
-import base64, gzip, json, os, boto3
-client = boto3.client('logs')
-LOG_GROUP = os.environ['AUDIT_LOG_GROUP']
-_known_streams = set()
-
-def _ensure_stream(name):
-    """転送先ロググループにストリームが無ければ作成する（warm 実行間でキャッシュ）。"""
-    if name in _known_streams:
-        return
-    try:
-        client.create_log_stream(logGroupName=LOG_GROUP, logStreamName=name)
-    except client.exceptions.ResourceAlreadyExistsException:
-        pass
-    _known_streams.add(name)
-
-def handler(event, context):
-    data = json.loads(gzip.decompress(base64.b64decode(event['awslogs']['data'])))
-    stream = data['logStream']
-    _ensure_stream(stream)
-    events = [{'timestamp': e['timestamp'], 'message': e['message']} for e in data['logEvents']]
-    events.sort(key=lambda e: e['timestamp'])
-    # PutLogEvents の上限（1バッチ10,000件/1MB）に対する保守的な分割
-    for i in range(0, len(events), 1000):
-        client.put_log_events(
-            logGroupName=LOG_GROUP,
-            logStreamName=stream,
-            logEvents=events[i:i+1000],
-        )
-`),
-      environment: { AUDIT_LOG_GROUP: auditLogGroup.logGroupName },
-      timeout: cdk.Duration.seconds(30),
-    });
-    auditLogGroup.grantWrite(auditFn);
-
-    new logs.SubscriptionFilter(this, 'AuditFilter', {
-      logGroup,
-      destination: new logs_destinations.LambdaDestination(auditFn),
-      filterPattern: logs.FilterPattern.literal('admin_audit'),
-    });
-
-    // ========================================
-    // Helper: create ECS Fargate Service
-    // ========================================
-    const createService = (
-      name: string,
-      taskDef: ecs.FargateTaskDefinition,
-      port: number,
-      opts?: { desiredCount?: number; minCapacity?: number; maxCapacity?: number },
-    ) => {
-      const svc = new ecs.FargateService(this, `${name}Service`, {
-        cluster,
-        taskDefinition: taskDef,
-        desiredCount: opts?.desiredCount ?? 1,
-        securityGroups: [ecsSg],
-        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-        cloudMapOptions: {
-          name: `nextcloud-aio-${name}`,
-          cloudMapNamespace: namespace,
-          dnsRecordType: servicediscovery.DnsRecordType.A,
-          dnsTtl: cdk.Duration.seconds(10),
-        },
-        enableExecuteCommand: true,
-        circuitBreaker: { enable: true, rollback: true },
-      });
-
-      if (opts?.maxCapacity) {
-        const scaling = svc.autoScaleTaskCount({ minCapacity: opts.minCapacity ?? 1, maxCapacity: opts.maxCapacity });
-        scaling.scaleOnCpuUtilization(`${name}CpuScaling`, { targetUtilizationPercent: 70 });
-      }
-      return svc;
-    };
-
-    // ========================================
-    // 11. Nextcloud Task Definition
-    // ========================================
-    const nextcloudTd = new ecs.FargateTaskDefinition(this, 'NextcloudTd', {
-      cpu: 1024, memoryLimitMiB: 2048,
-      taskRole, executionRole,
-    });
-
-    nextcloudTd.addVolume({
-      name: 'nextcloud-html',
-      efsVolumeConfiguration: {
-        fileSystemId: fileSystem.fileSystemId,
-        transitEncryption: 'ENABLED',
-        authorizationConfig: { accessPointId: apNextcloudHtml.accessPointId },
-      },
-    });
-    nextcloudTd.addVolume({
-      name: 'nextcloud-data',
-      efsVolumeConfiguration: {
-        fileSystemId: fileSystem.fileSystemId,
-        transitEncryption: 'ENABLED',
-        authorizationConfig: { accessPointId: apNextcloudData.accessPointId },
-      },
-    });
-
-    const nextcloudContainer = nextcloudTd.addContainer('nextcloud', {
-      image: ecs.ContainerImage.fromRegistry(nextcloudImageUri),
-      logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'nextcloud', logGroup }),
-      portMappings: [{ containerPort: 9000 }, { containerPort: 9001 }],
-      healthCheck: {
-        command: ['CMD-SHELL', 'exit 0'],
-        interval: cdk.Duration.seconds(30),
-        timeout: cdk.Duration.seconds(5),
-        retries: 3,
-      },
-      secrets: {
-        POSTGRES_PASSWORD: ecs.Secret.fromSecretsManager(dbSecret, 'password'),
-        ADMIN_PASSWORD: ecs.Secret.fromSecretsManager(adminSecret),
-        ...(enableFulltextsearch && osSecret ? { FULLTEXTSEARCH_PASSWORD: ecs.Secret.fromSecretsManager(osSecret, 'password') } : {}),
-        ...(enableTalk && talkSecret ? { TURN_SECRET: ecs.Secret.fromSecretsManager(talkSecret) } : {}),
-        ...(enableTalk && signalingSecret ? { SIGNALING_SECRET: ecs.Secret.fromSecretsManager(signalingSecret) } : {}),
-        ...(enableImaginary && imaginarySecret ? { IMAGINARY_SECRET: ecs.Secret.fromSecretsManager(imaginarySecret) } : {}),
-        ONLYOFFICE_SECRET: ecs.Secret.fromSecretsManager(onlyofficeSecret),
-      },
-      environment: {
-        POSTGRES_HOST: dbCluster.clusterEndpoint.hostname,
-        POSTGRES_PORT: '5432',
-        POSTGRES_DB: 'nextcloud_database',
-        POSTGRES_USER: 'nextcloud',
-        PGSSLCERT: '',
-        REDIS_HOST: cache.attrEndpointAddress,
-        REDIS_PORT: cache.attrEndpointPort,
-        REDIS_TLS_ENABLED: 'true',
-        REDIS_MODE: 'rediscluster',
-        NC_DOMAIN: domain,
-        OVERWRITEPROTOCOL: 'https',
-        APACHE_HOST: `nextcloud-aio-apache.nextcloud.local`,
-        APACHE_PORT: String(apachePort),
-        NEXTCLOUD_HOST: 'nextcloud-aio-nextcloud.nextcloud.local',
-        ADMIN_USER: 'admin',
-        NEXTCLOUD_DATA_DIR: '/mnt/ncdata',
-        OBJECTSTORE_S3_BUCKET: bucket.bucketName,
-        OBJECTSTORE_S3_REGION: this.region,
-        OBJECTSTORE_S3_SSL: 'true',
-        OBJECTSTORE_S3_AUTOCREATE: 'true',
-        OBJECTSTORE_S3_USEPATH_STYLE: 'false',
-        PHP_MEMORY_LIMIT: '512M',
-        PHP_UPLOAD_LIMIT: '16G',
-        PHP_MAX_TIME: '3600',
-        TZ: 'Asia/Tokyo',
-        ONLYOFFICE_ENABLED: enableOnlyOffice ? 'yes' : 'no',
-        ONLYOFFICE_HOST: 'nextcloud-aio-onlyoffice.nextcloud.local',
-        TALK_ENABLED: enableTalk ? 'yes' : 'no',
-        TALK_HOST: 'nextcloud-aio-talk.nextcloud.local',
-        TALK_PORT: '3478',
-        TURN_DOMAIN: talkNlbDns || domain,
-        COLLABORA_ENABLED: 'no',
-        CLAMAV_ENABLED: enableClamav ? 'yes' : 'no',
-        IMAGINARY_ENABLED: enableImaginary ? 'yes' : 'no',
-        IMAGINARY_HOST: enableImaginary ? 'nextcloud-aio-imaginary.nextcloud.local' : '',
-        FULLTEXTSEARCH_ENABLED: enableFulltextsearch ? 'yes' : 'no',
-        FULLTEXTSEARCH_HOST: enableFulltextsearch && osDomain ? osDomain.domainEndpoint : '',
-        FULLTEXTSEARCH_PORT: enableFulltextsearch ? '443' : '',
-        FULLTEXTSEARCH_PROTOCOL: 'https',
-        FULLTEXTSEARCH_USER: 'admin',
-        ...(enableFulltextsearch ? {} : { FULLTEXTSEARCH_PASSWORD: 'none' }),
-        FULLTEXTSEARCH_INDEX: 'nextcloud-aio',
-        WHITEBOARD_ENABLED: 'no',
-        STARTUP_APPS: 'deck twofactor_totp tasks calendar contacts notes drawio mail forms groupfolders user_saml files_accesscontrol suspicious_login',
-        UPDATE_NEXTCLOUD_APPS: 'no',
-        // メジャーアップグレード時に未対応アプリが「無効化」に留まり「削除」されないようにする
-        REMOVE_DISABLED_APPS: 'no',
-        NEXTCLOUD_LOG_TYPE: 'errorlog',
-        // NOTE: 意図的にデプロイ時刻等の非決定値を含めない。
-        // 非決定値があると synth のたびにタスク定義が置換され、
-        // cdk diff が常に差分を示して冪等性が失われる。
-      },
-    });
-    nextcloudContainer.addMountPoints(
-      { sourceVolume: 'nextcloud-html', containerPath: '/var/www/html', readOnly: false },
-      { sourceVolume: 'nextcloud-data', containerPath: '/mnt/ncdata', readOnly: false },
-    );
-
-    // 通常運用時の desired count（アップグレード SFN のロールバックと共有）
-    const serviceBaseline: ServiceBaselineCounts = { nextcloud: 1, apache: 2, notifyPush: 1 };
-
-    const nextcloudSvc = createService('nextcloud', nextcloudTd, 9000, { desiredCount: serviceBaseline.nextcloud, minCapacity: 1, maxCapacity: 10 });
-
-    // ========================================
-    // 12. Apache Task Definition
-    // ========================================
-    const apacheTd = new ecs.FargateTaskDefinition(this, 'ApacheTd', {
-      cpu: 512, memoryLimitMiB: 1024,
-      taskRole, executionRole,
-    });
-
-    apacheTd.addVolume({
-      name: 'nextcloud-html',
-      efsVolumeConfiguration: {
-        fileSystemId: fileSystem.fileSystemId,
-        transitEncryption: 'ENABLED',
-        authorizationConfig: { accessPointId: apNextcloudHtml.accessPointId },
-      },
-    });
-    apacheTd.addVolume({
-      name: 'apache-data',
-      efsVolumeConfiguration: {
-        fileSystemId: fileSystem.fileSystemId,
-        transitEncryption: 'ENABLED',
-        authorizationConfig: { accessPointId: apApacheData.accessPointId },
-      },
-    });
-
-    const apacheContainer = apacheTd.addContainer('apache', {
-      image: ecs.ContainerImage.fromRegistry(`ghcr.io/nextcloud-releases/aio-apache:${aioImageTag}`),
-      logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'apache', logGroup }),
-      portMappings: [{ containerPort: apachePort }],
-      healthCheck: {
-        command: ['CMD-SHELL', 'exit 0'],
-        interval: cdk.Duration.seconds(30),
-        timeout: cdk.Duration.seconds(30),
-        retries: 3,
-        startPeriod: cdk.Duration.seconds(60),
-      },
-      environment: {
-        APACHE_PORT: String(apachePort),
-        APACHE_MAX_SIZE: '17179869184',
-        APACHE_MAX_TIME: '3600',
-        NC_DOMAIN: domain,
-        APACHE_HOST: 'nextcloud-aio-apache.nextcloud.local',
-        NEXTCLOUD_HOST: 'nextcloud-aio-nextcloud.nextcloud.local',
-        NOTIFY_PUSH_HOST: 'nextcloud-aio-notify-push.nextcloud.local',
-        ONLYOFFICE_HOST: enableOnlyOffice ? 'nextcloud-aio-onlyoffice.nextcloud.local' : 'localhost',
-        TALK_HOST: enableTalk ? 'nextcloud-aio-talk.nextcloud.local' : 'localhost',
-        COLLABORA_HOST: 'localhost',
-        WHITEBOARD_HOST: 'localhost',
-        HARP_HOST: 'localhost',
-        TZ: 'Asia/Tokyo',
-      },
-    });
-    apacheContainer.addMountPoints(
-      { sourceVolume: 'nextcloud-html', containerPath: '/var/www/html', readOnly: true },
-      { sourceVolume: 'apache-data', containerPath: '/mnt/data', readOnly: false },
-    );
-
-    const apacheSvc = createService('apache', apacheTd, apachePort, { desiredCount: serviceBaseline.apache, minCapacity: 2, maxCapacity: 5 });
+    const apacheTd = buildApacheTask(this, config, common, files);
+    const apacheSvc = createFargateService(ctx, 'apache', apacheTd, { desiredCount: SERVICE_BASELINE.apache, minCapacity: 2, maxCapacity: 5 });
     apacheSvc.node.addDependency(nextcloudSvc);
 
-    // ========================================
-    // 13. Notify-push Task Definition
-    // ========================================
-    const notifyTd = new ecs.FargateTaskDefinition(this, 'NotifyPushTd', {
-      cpu: 256, memoryLimitMiB: 512,
-      taskRole, executionRole,
-    });
-    notifyTd.addVolume({
-      name: 'nextcloud-html',
-      efsVolumeConfiguration: {
-        fileSystemId: fileSystem.fileSystemId,
-        transitEncryption: 'ENABLED',
-        authorizationConfig: { accessPointId: apNextcloudHtml.accessPointId },
-      },
-    });
-    const notifyContainer = notifyTd.addContainer('notify-push', {
-      image: ecs.ContainerImage.fromRegistry(`ghcr.io/nextcloud-releases/aio-notify-push:${aioImageTag}`),
-      logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'notify-push', logGroup }),
-      portMappings: [{ containerPort: 7867 }],
-      healthCheck: {
-        command: ['CMD-SHELL', 'exit 0'],
-        interval: cdk.Duration.seconds(30),
-        timeout: cdk.Duration.seconds(30),
-        retries: 3,
-        startPeriod: cdk.Duration.seconds(60),
-      },
-      environment: {
-        NEXTCLOUD_HOST: 'nextcloud-aio-nextcloud.nextcloud.local',
-        NC_DOMAIN: domain,
-        POSTGRES_HOST: dbCluster.clusterEndpoint.hostname,
-        POSTGRES_PORT: '5432',
-        POSTGRES_DB: 'nextcloud_database',
-        POSTGRES_USER: 'nextcloud',
-        REDIS_HOST: cache.attrEndpointAddress,
-        REDIS_HOST_PORT: cache.attrEndpointPort,
-        TZ: 'Asia/Tokyo',
-      },
-      secrets: {
-        POSTGRES_PASSWORD: ecs.Secret.fromSecretsManager(dbSecret, 'password'),
-      },
-    });
-    notifyContainer.addMountPoints({ sourceVolume: 'nextcloud-html', containerPath: '/nextcloud', readOnly: true });
-    const notifySvc = createService('notify-push', notifyTd, 7867, { desiredCount: serviceBaseline.notifyPush });
+    const notifyTd = buildNotifyPushTask(this, config, common, files, { dbCluster, dbSecret, cache });
+    const notifySvc = createFargateService(ctx, 'notify-push', notifyTd, { desiredCount: SERVICE_BASELINE.notifyPush });
     notifySvc.node.addDependency(nextcloudSvc);
 
-    // ========================================
-    // 14. OnlyOffice (optional)
-    // ========================================
-    if (enableOnlyOffice) {
-      const apOnlyoffice = fileSystem.addAccessPoint('OnlyofficeData', {
-        path: '/onlyoffice-data',
-        posixUser: { uid: '104', gid: '104' },
-        createAcl: { ownerUid: '104', ownerGid: '104', permissions: '777' },
-      });
-      const ooTd = new ecs.FargateTaskDefinition(this, 'OnlyofficeTd', {
-        cpu: 2048, memoryLimitMiB: 4096,
-        taskRole, executionRole,
-      });
-      ooTd.addVolume({
-        name: 'onlyoffice-data',
-        efsVolumeConfiguration: {
-          fileSystemId: fileSystem.fileSystemId,
-          transitEncryption: 'ENABLED',
-          authorizationConfig: { accessPointId: apOnlyoffice.accessPointId },
-        },
-      });
-      const ooContainer = ooTd.addContainer('onlyoffice', {
-        image: ecs.ContainerImage.fromRegistry(`ghcr.io/nextcloud-releases/aio-onlyoffice:${aioImageTag}`),
-        logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'onlyoffice', logGroup }),
-        portMappings: [{ containerPort: 80 }],
-        healthCheck: {
-          command: ['CMD-SHELL', 'exit 0'],
-          interval: cdk.Duration.seconds(30),
-          timeout: cdk.Duration.seconds(30),
-          retries: 9,
-          startPeriod: cdk.Duration.seconds(120),
-        },
-        environment: {
-          JWT_ENABLED: 'true',
-          JWT_HEADER: 'AuthorizationJwt',
-          TZ: 'Asia/Tokyo',
-        },
-        secrets: {
-          JWT_SECRET: ecs.Secret.fromSecretsManager(onlyofficeSecret),
-        },
-      });
-      ooContainer.addMountPoints({ sourceVolume: 'onlyoffice-data', containerPath: '/var/lib/onlyoffice', readOnly: false });
-      createService('onlyoffice', ooTd, 80);
-      NagSuppressions.addResourceSuppressions(ooTd, [
-        { id: 'AwsSolutions-ECS2', reason: 'Non-sensitive configuration values (feature flags) passed as environment variables' },
-      ]);
-    }
-
-    // ========================================
-    // 14b. Imaginary (optional)
-    // ========================================
-    if (enableImaginary && imaginarySecret) {
-      const imgTd = new ecs.FargateTaskDefinition(this, 'ImaginaryTd', {
-        cpu: 512, memoryLimitMiB: 1024,
-        taskRole, executionRole,
-      });
-      imgTd.addContainer('imaginary', {
-        image: ecs.ContainerImage.fromRegistry(`ghcr.io/nextcloud-releases/aio-imaginary:${aioImageTag}`),
-        logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'imaginary', logGroup }),
-        portMappings: [{ containerPort: 9000 }],
-        healthCheck: {
-          command: ['CMD-SHELL', 'exit 0'],
-          interval: cdk.Duration.seconds(30),
-          timeout: cdk.Duration.seconds(30),
-          retries: 3,
-        },
-        environment: { TZ: 'Asia/Tokyo' },
-        secrets: { IMAGINARY_SECRET: ecs.Secret.fromSecretsManager(imaginarySecret) },
-      });
-      createService('imaginary', imgTd, 9000);
-    }
-
-    // ========================================
-    // 14c. Talk (optional)
-    // ========================================
-    if (enableTalk && talkSecret && signalingSecret && talkInternalSecret) {
-      const talkSg = new ec2.SecurityGroup(this, 'TalkSg', { vpc, description: 'Talk TURN' });
-      talkSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(3478), 'TURN TCP');
-      talkSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.udp(3478), 'TURN UDP');
-      talkSg.addIngressRule(ec2.Peer.ipv4(vpc.vpcCidrBlock), ec2.Port.tcp(8081), 'NLB health check');
-
-      const talkTd = new ecs.FargateTaskDefinition(this, 'TalkTd', {
-        cpu: 512, memoryLimitMiB: 1024,
-        taskRole, executionRole,
-      });
-      talkTd.addContainer('talk', {
-        image: ecs.ContainerImage.fromRegistry(`ghcr.io/nextcloud-releases/aio-talk:${aioImageTag}`),
-        logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'talk', logGroup }),
-        portMappings: [
-          { containerPort: 8081, protocol: ecs.Protocol.TCP },
-          { containerPort: 3478, protocol: ecs.Protocol.TCP },
-          { containerPort: 3478, protocol: ecs.Protocol.UDP },
-        ],
-        healthCheck: {
-          command: ['CMD-SHELL', 'exit 0'],
-          interval: cdk.Duration.seconds(30),
-          timeout: cdk.Duration.seconds(5),
-          retries: 3,
-        },
-        environment: {
-          NC_DOMAIN: domain,
-          TALK_HOST: 'nextcloud-aio-talk.nextcloud.local',
-          TALK_PORT: '3478',
-          TZ: 'Asia/Tokyo',
-        },
-        secrets: {
-          TURN_SECRET: ecs.Secret.fromSecretsManager(talkSecret),
-          SIGNALING_SECRET: ecs.Secret.fromSecretsManager(signalingSecret),
-          INTERNAL_SECRET: ecs.Secret.fromSecretsManager(talkInternalSecret),
-        },
-      });
-
-      const talkSvc = new ecs.FargateService(this, 'TalkService', {
-        cluster,
-        taskDefinition: talkTd,
-        desiredCount: 1,
-        securityGroups: [ecsSg, talkSg],
-        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-        cloudMapOptions: {
-          name: 'nextcloud-aio-talk',
-          cloudMapNamespace: namespace,
-          dnsRecordType: servicediscovery.DnsRecordType.A,
-          dnsTtl: cdk.Duration.seconds(10),
-        },
-        enableExecuteCommand: true,
-      });
-
-      // NLB for TURN (TCP+UDP:3478)
-      const nlb = new elbv2.NetworkLoadBalancer(this, 'TalkNlb', {
-        vpc,
-        internetFacing: true,
-        crossZoneEnabled: true,
-      });
-      nlb.addListener('Turn', { port: 3478, protocol: elbv2.Protocol.TCP_UDP })
-        .addTargets('TurnTarget', { port: 3478, protocol: elbv2.Protocol.TCP_UDP, targets: [talkSvc], healthCheck: { protocol: elbv2.Protocol.TCP, port: '8081' } });
-
-      talkNlbDns = hostedZone ? `turn.${domain}` : nlb.loadBalancerDnsName;
-      new cdk.CfnOutput(this, 'TalkNlbDns', { value: nlb.loadBalancerDnsName });
-
-      if (hostedZone) {
-        new route53.ARecord(this, 'TurnDnsRecord', {
-          zone: hostedZone,
-          recordName: `turn.${domain}`,
-          target: route53.RecordTarget.fromAlias(new route53targets.LoadBalancerTarget(nlb)),
-        });
-      }
-
-      [talkSecret, signalingSecret, talkInternalSecret].forEach(s => s.grantRead(executionRole));
-      NagSuppressions.addResourceSuppressions(talkSg, [
-        { id: 'AwsSolutions-EC23', reason: 'TURN server requires public access on port 3478 for WebRTC relay' },
-      ]);
-    }
-
-    // ========================================
-    // 15. ALB + DNS
-    // ========================================
-
-    // ACM certificate: use provided ARN, or auto-create if hosted zone is available
-    const certificate = certificateArn
-      ? acm.Certificate.fromCertificateArn(this, 'Cert', certificateArn)
-      : hostedZone
-        ? new acm.Certificate(this, 'Cert', { domainName: domain, validation: acm.CertificateValidation.fromDns(hostedZone) })
-        : undefined;
-
-    const alb = new elbv2.ApplicationLoadBalancer(this, 'Alb', {
-      vpc,
-      internetFacing: true,
-      securityGroup: albSg,
-    });
-    alb.logAccessLogs(accessLogBucket, 'alb');
-
-    const listenerProps: elbv2.BaseApplicationListenerProps = certificate
-      ? { port: 443, protocol: elbv2.ApplicationProtocol.HTTPS, certificates: [certificate], sslPolicy: elbv2.SslPolicy.RECOMMENDED_TLS }
-      : { port: 80, protocol: elbv2.ApplicationProtocol.HTTP };
-    const listener = alb.addListener('Listener', listenerProps);
-
-    const apacheTargetGroup = listener.addTargets('ApacheTarget', {
-      port: apachePort,
-      protocol: elbv2.ApplicationProtocol.HTTP,
-      targets: [apacheSvc],
-      healthCheck: {
-        path: '/status.php',
-        port: String(apachePort),
-        interval: cdk.Duration.seconds(30),
-        healthyThresholdCount: 2,
-        unhealthyThresholdCount: 3,
-        healthyHttpCodes: '200,400',
-      },
-      stickinessCookieDuration: cdk.Duration.hours(1),
+    const optional = this.buildOptionalServices({
+      config, ctx, common, files, network, featureSecrets, onlyofficeSecret, hostedZone,
     });
 
-    // ========================================
-    // 16. Upgrade State Machine (Step Functions)
-    //
-    // 2フェーズ・waitForTaskToken 方式:
-    //   Phase 1（準備）: maintenance ON → Web系サービス縮退(0) → Aurora スナップショット
-    //                    → config.php バックアップ
-    //   ---- SQS でタスクトークンを配送し、operator が cdk deploy（新イメージ）を実施 ----
-    //   Phase 2（検証・復帰）: occ status 検証 → maintenance OFF → 完了
-    //
-    // 設計上の要点:
-    //   - ECS サービスは CloudFormation 生成の実サービス名を CFN 参照で指定する
-    //     （Cloud Map のサービスディスカバリ名では UpdateService は解決できない）
-    //   - occ は one-off Fargate タスク（nextcloudTd 流用）で RUN_JOB 実行し、
-    //     ExitCode==0 を明示検査する（runTask の fire-and-forget を排除）
-    //   - 縮退により、EFS 上のコードを rsync する upgrade 中に旧タスクが
-    //     混在バージョンのコードを実行することを防ぐ
-    //   - 失敗時のロールバックは desired count 復元のみのベストエフォート。
-    //     データ復旧の正典は Aurora スナップショットと S3 上の config.php
-    // ========================================
-    const sfnRole = new iam.Role(this, 'SfnRole', {
-      assumedBy: new iam.ServicePrincipal('states.amazonaws.com'),
+    const { alb, apacheTargetGroup } = buildLoadBalancer(this, config, {
+      vpc: network.vpc, albSg: network.albSg, accessLogBucket, apacheService: apacheSvc, hostedZone,
     });
-    sfnRole.addToPolicy(new iam.PolicyStatement({
-      actions: ['iam:PassRole'],
-      resources: [taskRole.roleArn, executionRole.roleArn],
-    }));
-    sfnRole.addToPolicy(new iam.PolicyStatement({
-      actions: ['rds:CreateDBClusterSnapshot', 'rds:DescribeDBClusterSnapshots'],
-      resources: [dbCluster.clusterArn, `arn:aws:rds:${this.region}:${this.account}:cluster-snapshot:*`],
-    }));
 
-    /**
-     * occ コマンド等を one-off Fargate タスクとして同期実行するステップを生成する。
-     *
-     * RUN_JOB（runTask.sync）でタスク停止まで待機し、さらに Containers[0].ExitCode==0 を
-     * Choice で明示検査する。occ は config.php の所有者 (www-data) で実行する必要が
-     * あるため、呼び出し側は sudo -E -u www-data を付与すること。
-     * タスク定義はファミリー最新 ACTIVE リビジョンを起動するため、deploy 後の
-     * ステップは新イメージで実行される。
-     */
-    const createOccStep = (id: string, command: string[]): UpgradeStepChain => {
-      const run = new tasks.EcsRunTask(this, id, {
-        integrationPattern: sfn.IntegrationPattern.RUN_JOB,
-        cluster,
-        taskDefinition: nextcloudTd,
-        launchTarget: new tasks.EcsFargateLaunchTarget(),
-        subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-        securityGroups: [ecsSg],
-        assignPublicIp: false,
-        containerOverrides: [{ containerDefinition: nextcloudContainer, command }],
-        taskTimeout: sfn.Timeout.duration(cdk.Duration.minutes(30)),
-        resultPath: `$.${id}Result`,
-      });
-      const ok = new sfn.Pass(this, `${id}Ok`);
-      const failed = new sfn.Fail(this, `${id}Failed`, {
-        error: `${id}NonZeroExit`,
-        cause: `${id}: one-off task container exited with non-zero code`,
-      });
-      run.next(
-        new sfn.Choice(this, `${id}ExitCheck`)
-          .when(sfn.Condition.numberEquals(`$.${id}Result.Containers[0].ExitCode`, 0), ok)
-          .otherwise(failed),
-      );
-      return { entry: run, exit: ok };
+    const { stateMachine, sfnRole } = buildUpgradeStateMachine(this, {
+      cluster, ecsSg: network.ecsSg,
+      nextcloudTaskDefinition: nextcloud.taskDefinition, nextcloudContainer: nextcloud.container,
+      taskRole, executionRole, dbCluster, bucket, apacheTargetGroup,
+      nextcloudService: nextcloudSvc, apacheService: apacheSvc, notifyService: notifySvc,
+      baseline: SERVICE_BASELINE,
+    });
+
+    const monitoringTargets = {
+      nextcloudService: nextcloudSvc, apacheService: apacheSvc, notifyService: notifySvc,
+      alb, dbCluster, logGroup, auroraMaxAcu: config.auroraMaxAcu, alarmEmails: config.alarmEmails,
     };
-
-    /**
-     * ECS サービスの desired count を変更するステップを生成する。
-     * serviceName には CFN が生成した実サービス名（svc.serviceName）を渡すこと。
-     */
-    const scaleService = (id: string, serviceName: string, count: number): tasks.CallAwsService =>
-      new tasks.CallAwsService(this, id, {
-        service: 'ecs',
-        action: 'updateService',
-        parameters: {
-          Cluster: cluster.clusterArn,
-          Service: serviceName,
-          DesiredCount: count,
-        },
-        iamResources: ['*'],
-        resultPath: sfn.JsonPath.DISCARD,
-      });
-
-    // Step 0: 実行IDの抽出（スナップショット名に使用）
-    const extractId = new sfn.Pass(this, 'ExtractExecutionId', {
-      parameters: { 'executionId.$': '$$.Execution.Name' },
+    const errorMetric = buildErrorMetric(this, logGroup);
+    buildAlarms(this, monitoringTargets, errorMetric);
+    new DataBackup(this, 'DataBackup', {
+      fileSystem: files.fileSystem,
+      dbCluster,
+      dailyRetentionDays: config.backupDailyRetentionDays,
+      weeklyRetentionDays: config.backupWeeklyRetentionDays,
     });
+    new ImageScanning(this, 'ImageScanning', { repositoryNames: config.ecrScanRepositories });
+    buildDashboard(this, monitoringTargets, errorMetric);
 
-    // Step 1: メンテナンスモード ON
-    const maintenanceOn = createOccStep('MaintenanceOn',
-      ['sudo', '-E', '-u', 'www-data', 'php', '/var/www/html/occ', 'maintenance:mode', '--on']);
-
-    // Step 2: Web系サービスを 0 に縮退
-    const scaleDownAll = new sfn.Parallel(this, 'ScaleDownAll', { resultPath: sfn.JsonPath.DISCARD })
-      .branch(scaleService('ScaleDownNextcloud', nextcloudSvc.serviceName, 0))
-      .branch(scaleService('ScaleDownApache', apacheSvc.serviceName, 0))
-      .branch(scaleService('ScaleDownNotify', notifySvc.serviceName, 0));
-
-    // Step 3: 全タスク停止をポーリングで確認（固定待機は使わない）
-    const describeAfterScaleDown = new tasks.CallAwsService(this, 'DescribeAfterScaleDown', {
-      service: 'ecs',
-      action: 'describeServices',
-      parameters: {
-        Cluster: cluster.clusterArn,
-        Services: [nextcloudSvc.serviceName, apacheSvc.serviceName, notifySvc.serviceName],
-      },
-      iamResources: ['*'],
-      resultPath: '$.scaleDownStatus',
-    });
-    const waitTasksStopping = new sfn.Wait(this, 'WaitTasksStopping', {
-      time: sfn.WaitTime.duration(cdk.Duration.seconds(15)),
-    });
-    const tasksStoppedOk = new sfn.Pass(this, 'AllTasksStopped');
-    const checkTasksStopped = new sfn.Choice(this, 'CheckTasksStopped')
-      .when(sfn.Condition.and(
-        sfn.Condition.numberEquals('$.scaleDownStatus.Services[0].RunningCount', 0),
-        sfn.Condition.numberEquals('$.scaleDownStatus.Services[1].RunningCount', 0),
-        sfn.Condition.numberEquals('$.scaleDownStatus.Services[2].RunningCount', 0),
-      ), tasksStoppedOk)
-      .otherwise(waitTasksStopping);
-    waitTasksStopping.next(describeAfterScaleDown);
-    describeAfterScaleDown.next(checkTasksStopped);
-
-    // Step 4: Aurora スナップショット取得 → available をポーリング
-    const createSnapshot = new tasks.CallAwsService(this, 'CreateSnapshot', {
-      service: 'rds',
-      action: 'createDBClusterSnapshot',
-      parameters: {
-        'DbClusterIdentifier': dbCluster.clusterIdentifier,
-        'DbClusterSnapshotIdentifier.$': "States.Format('pre-upgrade-{}', $.executionId)",
-      },
-      iamResources: ['*'],
-      resultPath: sfn.JsonPath.DISCARD,
-    });
-    const describeSnapshot = new tasks.CallAwsService(this, 'DescribeSnapshot', {
-      service: 'rds',
-      action: 'describeDBClusterSnapshots',
-      parameters: {
-        'DbClusterSnapshotIdentifier.$': "States.Format('pre-upgrade-{}', $.executionId)",
-      },
-      iamResources: ['*'],
-      resultPath: '$.snapshotStatus',
-    });
-    const waitSnapshot = new sfn.Wait(this, 'WaitSnapshotAvailable', {
-      time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
-    });
-    const snapshotOk = new sfn.Pass(this, 'SnapshotAvailable');
-    const checkSnapshot = new sfn.Choice(this, 'CheckSnapshotStatus')
-      .when(sfn.Condition.stringEquals('$.snapshotStatus.DbClusterSnapshots[0].Status', 'available'), snapshotOk)
-      .otherwise(waitSnapshot);
-    waitSnapshot.next(describeSnapshot);
-    describeSnapshot.next(checkSnapshot);
-
-    // Step 5: config.php をバックアップ
-    // このステップは deploy 前＝旧イメージの one-off タスクで実行されるため、
-    // 旧イメージに aws-cli が無くても成立するよう EFS(/mnt/ncdata) への cp を必須とし、
-    // aws-cli が存在する場合のみ S3 へもコピーする（初回アップグレードのブートストラップ対策）。
-    const backupConfig = createOccStep('BackupConfig', [
-      'sh', '-c',
-      [
-        'set -e',
-        'TS=$(date +%Y%m%d%H%M%S)',
-        'cp /var/www/html/config/config.php "/mnt/ncdata/config.php.backup.$TS"',
-        'if command -v aws >/dev/null 2>&1; then',
-        `  aws s3 cp "/mnt/ncdata/config.php.backup.$TS" "s3://${bucket.bucketName}/backups/config.php.$TS"`,
-        'else',
-        '  echo "aws-cli not present in this image; EFS backup only"',
-        'fi',
-      ].join('\n'),
-    ]);
-
-    // Step 6: SQS にタスクトークンを配送し、operator の cdk deploy 完了を待つ
-    const upgradeDlq = new sqs.Queue(this, 'UpgradeApprovalDlq', {
-      enforceSSL: true,
-      encryption: sqs.QueueEncryption.SQS_MANAGED,
-      retentionPeriod: cdk.Duration.days(14),
-    });
-    NagSuppressions.addResourceSuppressions(upgradeDlq, [
-      { id: 'AwsSolutions-SQS3', reason: 'This queue is itself the dead-letter queue for the upgrade approval queue.' },
-    ]);
-    const upgradeQueue = new sqs.Queue(this, 'UpgradeApprovalQueue', {
-      enforceSSL: true,
-      encryption: sqs.QueueEncryption.SQS_MANAGED,
-      retentionPeriod: cdk.Duration.days(4),
-      visibilityTimeout: cdk.Duration.minutes(5),
-      deadLetterQueue: { queue: upgradeDlq, maxReceiveCount: 10 },
-    });
-    const waitForDeploy = new tasks.SqsSendMessage(this, 'WaitForDeploy', {
-      queue: upgradeQueue,
-      integrationPattern: sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
-      messageBody: sfn.TaskInput.fromObject({
-        action: 'NEXTCLOUD_UPGRADE_READY',
-        executionId: sfn.JsonPath.stringAt('$.executionId'),
-        taskToken: sfn.JsonPath.taskToken,
-        instruction: [
-          '1) cdk.json の nextcloudImageUri を新イメージに更新',
-          '2) npx cdk deploy NextcloudAioStack',
-          '3) aws stepfunctions send-task-success --task-token <taskToken> --task-output {}',
-          '中止する場合: aws stepfunctions send-task-failure --task-token <taskToken>',
-        ].join(' / '),
-      }),
-      taskTimeout: sfn.Timeout.duration(cdk.Duration.hours(3)),
-      resultPath: sfn.JsonPath.DISCARD,
-    });
-
-    // Step 7: 基準 desired count へ復元
-    // cdk deploy はタスク定義が変わったサービスしか更新しないため（CFN は無変更リソースを
-    // 更新しない）、SFN が下げた desired の復元は成功パスで明示的に行う必要がある。
-    const restoreBaseline = new sfn.Parallel(this, 'RestoreBaseline', { resultPath: sfn.JsonPath.DISCARD })
-      .branch(scaleService('RestoreNextcloud', nextcloudSvc.serviceName, serviceBaseline.nextcloud))
-      .branch(scaleService('RestoreApache', apacheSvc.serviceName, serviceBaseline.apache))
-      .branch(scaleService('RestoreNotify', notifySvc.serviceName, serviceBaseline.notifyPush));
-
-    // Step 8: ALB ターゲット健全化をポーリング
-    // ターゲットのヘルスチェックは /status.php を経由するため、healthy 到達は
-    // apache→nextcloud の疎通とアップグレード完了（maintenance 解除）の実証になる。
-    // この後の occ 検証はイメージと EFS のバージョンが一致した状態で走るため、
-    // one-off タスクの entrypoint が二重アップグレードに突入しない。
-    const describeTargetHealth = new tasks.CallAwsService(this, 'DescribeTargetHealth', {
-      service: 'elasticloadbalancingv2',
-      action: 'describeTargetHealth',
-      parameters: { TargetGroupArn: apacheTargetGroup.targetGroupArn },
-      iamAction: 'elasticloadbalancing:DescribeTargetHealth',
-      iamResources: ['*'],
-      resultPath: '$.tgHealth',
-    });
-    const waitTgHealthy = new sfn.Wait(this, 'WaitTargetsHealthy', {
-      time: sfn.WaitTime.duration(cdk.Duration.seconds(20)),
-    });
-    const tgHealthyOk = new sfn.Pass(this, 'TargetsHealthy');
-    const checkTgHealthy = new sfn.Choice(this, 'CheckTargetsHealthy')
-      .when(sfn.Condition.and(
-        sfn.Condition.isPresent('$.tgHealth.TargetHealthDescriptions[0].TargetHealth.State'),
-        sfn.Condition.stringEquals('$.tgHealth.TargetHealthDescriptions[0].TargetHealth.State', 'healthy'),
-      ), tgHealthyOk)
-      .otherwise(waitTgHealthy);
-    waitTgHealthy.next(describeTargetHealth);
-    describeTargetHealth.next(checkTgHealthy);
-
-    // Step 9: アップグレード検証（この時点でバージョン一致のため occ status は短時間で完了する）
-    const verifyUpgrade = createOccStep('VerifyUpgrade',
-      ['sudo', '-E', '-u', 'www-data', 'php', '/var/www/html/occ', 'status']);
-
-    // Step 10: メンテナンス OFF（entrypoint.sh が既に OFF にしていても冪等）
-    const maintenanceOffFinal = createOccStep('MaintenanceOffFinal',
-      ['sudo', '-E', '-u', 'www-data', 'php', '/var/www/html/occ', 'maintenance:mode', '--off']);
-
-    const upgradeSucceeded = new sfn.Succeed(this, 'UpgradeSucceeded');
-
-    // --- メインチェーン結線 ---
-    maintenanceOn.exit.next(scaleDownAll);
-    scaleDownAll.next(describeAfterScaleDown);
-    tasksStoppedOk.next(createSnapshot);
-    createSnapshot.next(describeSnapshot);
-    snapshotOk.next(backupConfig.entry);
-    backupConfig.exit.next(waitForDeploy);
-    waitForDeploy.next(restoreBaseline);
-    restoreBaseline.next(describeTargetHealth);
-    tgHealthyOk.next(verifyUpgrade.entry);
-    verifyUpgrade.exit.next(maintenanceOffFinal.entry);
-    maintenanceOffFinal.exit.next(upgradeSucceeded);
-
-    // --- ロールバック（ベストエフォート）---
-    // 新イメージ deploy 後の失敗では EFS 上のコードは新版に置換済みのため、
-    // desired 復元では旧版に戻らない。DB は pre-upgrade スナップショットから復旧する。
-    const rollbackScaleUp = new sfn.Parallel(this, 'RollbackScaleUp', { resultPath: sfn.JsonPath.DISCARD })
-      .branch(scaleService('RollbackNextcloud', nextcloudSvc.serviceName, serviceBaseline.nextcloud))
-      .branch(scaleService('RollbackApache', apacheSvc.serviceName, serviceBaseline.apache))
-      .branch(scaleService('RollbackNotify', notifySvc.serviceName, serviceBaseline.notifyPush));
-    const maintenanceOffRollback = createOccStep('MaintenanceOffRollback',
-      ['sudo', '-E', '-u', 'www-data', 'php', '/var/www/html/occ', 'maintenance:mode', '--off']);
-    const upgradeFailed = new sfn.Fail(this, 'UpgradeFailed', {
-      cause: 'Upgrade failed. Desired counts restored (best effort). Recover DB from the pre-upgrade snapshot if needed.',
-    });
-    rollbackScaleUp.next(maintenanceOffRollback.entry);
-    maintenanceOffRollback.exit.next(upgradeFailed);
-
-    // Parallel でラップして一括 catch
-    const mainChain = new sfn.Parallel(this, 'MainChain', { resultPath: sfn.JsonPath.DISCARD });
-    mainChain.branch(maintenanceOn.entry);
-    mainChain.addCatch(rollbackScaleUp, { resultPath: '$.error' });
-
-    const sfnLogGroup = new logs.LogGroup(this, 'SfnLogs', {
-      retention: logs.RetentionDays.ONE_MONTH,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-    });
-
-    const stateMachine = new sfn.StateMachine(this, 'UpgradeStateMachine', {
-      definitionBody: sfn.DefinitionBody.fromChainable(extractId.next(mainChain)),
-      timeout: cdk.Duration.hours(6),
-      role: sfnRole,
-      stateMachineName: 'nextcloud-upgrade',
-      tracingEnabled: true,
-      logs: { destination: sfnLogGroup, level: sfn.LogLevel.ALL },
-    });
-
-    new cdk.CfnOutput(this, 'UpgradeQueueUrl', { value: upgradeQueue.queueUrl });
-
-    // ========================================
-    // 17. CI/CD Pipeline - SKIPPED (requires github-token in Secrets Manager)
-    // ========================================
-
-    // ========================================
-    // 18. Monitoring - Log Metric Filters
-    // ========================================
-    const errorMetric = new logs.MetricFilter(this, 'ErrorLogFilter', {
-      logGroup,
-      filterPattern: logs.FilterPattern.anyTerm('ERROR', 'CRITICAL', 'Fatal'),
-      metricNamespace: 'Nextcloud',
-      metricName: 'ErrorCount',
-      metricValue: '1',
-      defaultValue: 0,
-    });
-
-    // ========================================
-    // 19. Monitoring - CloudWatch Alarms
-    // ========================================
-    // ECS: Nextcloud CPU high
-    new cloudwatch.Alarm(this, 'NextcloudCpuAlarm', {
-      metric: nextcloudSvc.metricCpuUtilization({ period: cdk.Duration.minutes(5) }),
-      threshold: 80,
-      evaluationPeriods: 3,
-      alarmDescription: 'Nextcloud ECS CPU > 80% for 15 min',
-    });
-
-    // ECS: Nextcloud Memory high
-    new cloudwatch.Alarm(this, 'NextcloudMemoryAlarm', {
-      metric: nextcloudSvc.metricMemoryUtilization({ period: cdk.Duration.minutes(5) }),
-      threshold: 85,
-      evaluationPeriods: 3,
-      alarmDescription: 'Nextcloud ECS Memory > 85% for 15 min',
-    });
-
-    // ECS: Apache CPU high
-    new cloudwatch.Alarm(this, 'ApacheCpuAlarm', {
-      metric: apacheSvc.metricCpuUtilization({ period: cdk.Duration.minutes(5) }),
-      threshold: 80,
-      evaluationPeriods: 3,
-      alarmDescription: 'Apache ECS CPU > 80% for 15 min',
-    });
-
-    // ALB: 5xx errors
-    const alb5xx = new cloudwatch.Alarm(this, 'Alb5xxAlarm', {
-      metric: alb.metrics.httpCodeElb(elbv2.HttpCodeElb.ELB_5XX_COUNT, { period: cdk.Duration.minutes(5) }),
-      threshold: 10,
-      evaluationPeriods: 2,
-      alarmDescription: 'ALB 5xx errors > 10 for 10 min',
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-    });
-
-    // ALB: Target 5xx errors
-    new cloudwatch.Alarm(this, 'Target5xxAlarm', {
-      metric: alb.metrics.httpCodeTarget(elbv2.HttpCodeTarget.TARGET_5XX_COUNT, { period: cdk.Duration.minutes(5) }),
-      threshold: 10,
-      evaluationPeriods: 2,
-      alarmDescription: 'Target 5xx errors > 10 for 10 min',
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-    });
-
-    // ALB: Target response time
-    new cloudwatch.Alarm(this, 'ResponseTimeAlarm', {
-      metric: alb.metrics.targetResponseTime({ period: cdk.Duration.minutes(5), statistic: 'p95' }),
-      threshold: 5,
-      evaluationPeriods: 3,
-      alarmDescription: 'ALB p95 response time > 5s for 15 min',
-    });
-
-    // ALB: Unhealthy targets
-    new cloudwatch.Alarm(this, 'UnhealthyTargetsAlarm', {
-      metric: new cloudwatch.Metric({
-        namespace: 'AWS/ApplicationELB',
-        metricName: 'UnHealthyHostCount',
-        dimensionsMap: { LoadBalancer: alb.loadBalancerFullName },
-        period: cdk.Duration.minutes(1),
-        statistic: 'Maximum',
-      }),
-      threshold: 1,
-      evaluationPeriods: 3,
-      alarmDescription: 'Unhealthy targets detected for 3 min',
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-    });
-
-    // Aurora: CPU
-    new cloudwatch.Alarm(this, 'AuroraCpuAlarm', {
-      metric: new cloudwatch.Metric({
-        namespace: 'AWS/RDS',
-        metricName: 'CPUUtilization',
-        dimensionsMap: { DBClusterIdentifier: dbCluster.clusterIdentifier },
-        period: cdk.Duration.minutes(5),
-        statistic: 'Average',
-      }),
-      threshold: 80,
-      evaluationPeriods: 3,
-      alarmDescription: 'Aurora CPU > 80% for 15 min',
-    });
-
-    // Aurora: Serverless capacity
-    new cloudwatch.Alarm(this, 'AuroraCapacityAlarm', {
-      metric: new cloudwatch.Metric({
-        namespace: 'AWS/RDS',
-        metricName: 'ServerlessDatabaseCapacity',
-        dimensionsMap: { DBClusterIdentifier: dbCluster.clusterIdentifier },
-        period: cdk.Duration.minutes(5),
-        statistic: 'Average',
-      }),
-      threshold: auroraMaxAcu * 0.8,
-      evaluationPeriods: 3,
-      alarmDescription: `Aurora capacity > ${auroraMaxAcu * 0.8} ACU for 15 min`,
-    });
-
-    // Aurora: Freeable memory low
-    new cloudwatch.Alarm(this, 'AuroraMemoryAlarm', {
-      metric: new cloudwatch.Metric({
-        namespace: 'AWS/RDS',
-        metricName: 'FreeableMemory',
-        dimensionsMap: { DBClusterIdentifier: dbCluster.clusterIdentifier },
-        period: cdk.Duration.minutes(5),
-        statistic: 'Average',
-      }),
-      threshold: 256 * 1024 * 1024, // 256MB
-      evaluationPeriods: 3,
-      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
-      alarmDescription: 'Aurora freeable memory < 256MB for 15 min',
-    });
-
-    // Log errors
-    new cloudwatch.Alarm(this, 'ErrorLogAlarm', {
-      metric: errorMetric.metric({ period: cdk.Duration.minutes(5), statistic: 'Sum' }),
-      threshold: 50,
-      evaluationPeriods: 2,
-      alarmDescription: 'Error log count > 50 in 10 min',
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-    });
-
-    // ========================================
-    // 20. CloudWatch Dashboard
-    // ========================================
-    const dashboard = new cloudwatch.Dashboard(this, 'Dashboard', {
-      dashboardName: 'Nextcloud-Monitoring',
-    });
-
-    // Row 1: ECS overview
-    dashboard.addWidgets(
-      new cloudwatch.GraphWidget({
-        title: 'ECS CPU Utilization',
-        left: [
-          nextcloudSvc.metricCpuUtilization({ label: 'Nextcloud' }),
-          apacheSvc.metricCpuUtilization({ label: 'Apache' }),
-          notifySvc.metricCpuUtilization({ label: 'Notify-push' }),
-        ],
-        width: 12,
-      }),
-      new cloudwatch.GraphWidget({
-        title: 'ECS Memory Utilization',
-        left: [
-          nextcloudSvc.metricMemoryUtilization({ label: 'Nextcloud' }),
-          apacheSvc.metricMemoryUtilization({ label: 'Apache' }),
-          notifySvc.metricMemoryUtilization({ label: 'Notify-push' }),
-        ],
-        width: 12,
-      }),
-    );
-
-    // Row 2: ALB
-    dashboard.addWidgets(
-      new cloudwatch.GraphWidget({
-        title: 'ALB Request Count & Errors',
-        left: [alb.metrics.requestCount({ label: 'Requests' })],
-        right: [
-          alb.metrics.httpCodeElb(elbv2.HttpCodeElb.ELB_5XX_COUNT, { label: '5xx', color: '#d62728' }),
-          alb.metrics.httpCodeTarget(elbv2.HttpCodeTarget.TARGET_5XX_COUNT, { label: 'Target 5xx', color: '#ff7f0e' }),
-        ],
-        width: 12,
-      }),
-      new cloudwatch.GraphWidget({
-        title: 'ALB Response Time (p50/p95/p99)',
-        left: [
-          alb.metrics.targetResponseTime({ label: 'p50', statistic: 'p50' }),
-          alb.metrics.targetResponseTime({ label: 'p95', statistic: 'p95' }),
-          alb.metrics.targetResponseTime({ label: 'p99', statistic: 'p99' }),
-        ],
-        width: 12,
-      }),
-    );
-
-    // Row 3: Aurora
-    dashboard.addWidgets(
-      new cloudwatch.GraphWidget({
-        title: 'Aurora CPU & Capacity',
-        left: [new cloudwatch.Metric({
-          namespace: 'AWS/RDS', metricName: 'CPUUtilization',
-          dimensionsMap: { DBClusterIdentifier: dbCluster.clusterIdentifier }, label: 'CPU %',
-        })],
-        right: [new cloudwatch.Metric({
-          namespace: 'AWS/RDS', metricName: 'ServerlessDatabaseCapacity',
-          dimensionsMap: { DBClusterIdentifier: dbCluster.clusterIdentifier }, label: 'ACU',
-        })],
-        width: 12,
-      }),
-      new cloudwatch.GraphWidget({
-        title: 'Aurora Connections & Latency',
-        left: [new cloudwatch.Metric({
-          namespace: 'AWS/RDS', metricName: 'DatabaseConnections',
-          dimensionsMap: { DBClusterIdentifier: dbCluster.clusterIdentifier }, label: 'Connections',
-        })],
-        right: [
-          new cloudwatch.Metric({
-            namespace: 'AWS/RDS', metricName: 'ReadLatency',
-            dimensionsMap: { DBClusterIdentifier: dbCluster.clusterIdentifier }, label: 'Read',
-          }),
-          new cloudwatch.Metric({
-            namespace: 'AWS/RDS', metricName: 'WriteLatency',
-            dimensionsMap: { DBClusterIdentifier: dbCluster.clusterIdentifier }, label: 'Write',
-          }),
-        ],
-        width: 12,
-      }),
-    );
-
-    // Row 4: Errors & ECS Task Count
-    dashboard.addWidgets(
-      new cloudwatch.GraphWidget({
-        title: 'Application Error Logs',
-        left: [errorMetric.metric({ label: 'Errors', statistic: 'Sum' })],
-        width: 12,
-      }),
-      new cloudwatch.SingleValueWidget({
-        title: 'Running Tasks',
-        metrics: [
-          nextcloudSvc.metricCpuUtilization({ label: 'Nextcloud CPU' }),
-          apacheSvc.metricCpuUtilization({ label: 'Apache CPU' }),
-        ],
-        width: 12,
-      }),
-    );
-
-    // ========================================
-    // Outputs
-    // ========================================
     new cdk.CfnOutput(this, 'AlbDns', { value: alb.loadBalancerDnsName });
-
-    // Route 53 Alias record
     if (hostedZone) {
-      new route53.ARecord(this, 'DnsRecord', {
-        zone: hostedZone,
-        recordName: domain,
-        target: route53.RecordTarget.fromAlias(new route53targets.LoadBalancerTarget(alb)),
-      });
+      buildDnsRecord(this, config, hostedZone, alb);
     }
     new cdk.CfnOutput(this, 'S3Bucket', { value: bucket.bucketName });
     new cdk.CfnOutput(this, 'AuroraEndpoint', { value: dbCluster.clusterEndpoint.hostname });
     new cdk.CfnOutput(this, 'CacheEndpoint', { value: cache.attrEndpointAddress });
-    new cdk.CfnOutput(this, 'EfsId', { value: fileSystem.fileSystemId });
+    new cdk.CfnOutput(this, 'EfsId', { value: files.fileSystem.fileSystemId });
     if (osDomain) {
       new cdk.CfnOutput(this, 'OsEndpoint', { value: osDomain.domainEndpoint });
     }
     new cdk.CfnOutput(this, 'UpgradeStateMachineArn', { value: stateMachine.stateMachineArn });
 
-    // ========================================
-    // Nag Suppressions (intentional design decisions)
-    // ========================================
-    NagSuppressions.addResourceSuppressions(albSg, [
-      { id: 'AwsSolutions-EC23', reason: 'ALB is public-facing for Nextcloud web access' },
-    ]);
-    NagSuppressions.addResourceSuppressions(executionRole, [
-      { id: 'AwsSolutions-IAM4', appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'], reason: 'Standard ECS task execution role managed policy' },
-    ]);
-    NagSuppressions.addResourceSuppressions(auditFn, [
-      { id: 'AwsSolutions-IAM4', appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'], reason: 'Standard Lambda execution role managed policy' },
-    ], true);
-    NagSuppressions.addResourceSuppressions([dbSecret, cacheSecret, adminSecret, onlyofficeSecret,
-      ...(osSecret ? [osSecret] : []),
-      ...(imaginarySecret ? [imaginarySecret] : []),
-      ...(talkSecret ? [talkSecret] : []),
-      ...(signalingSecret ? [signalingSecret] : []),
-      ...(talkInternalSecret ? [talkInternalSecret] : []),
-    ], [
-      { id: 'AwsSolutions-SMG4', reason: 'Secrets rotation requires application-level coordination; managed externally' },
-    ]);
-    const taskDefinitions = [nextcloudTd, apacheTd, notifyTd];
-    if (enableImaginary) taskDefinitions.push(this.node.findChild('ImaginaryTd') as ecs.FargateTaskDefinition);
-    if (enableTalk) taskDefinitions.push(this.node.findChild('TalkTd') as ecs.FargateTaskDefinition);
-    NagSuppressions.addResourceSuppressions(taskDefinitions, [
-      { id: 'AwsSolutions-ECS2', reason: 'Non-sensitive configuration values (hostnames, ports, feature flags) passed as environment variables' },
-    ]);
-    NagSuppressions.addResourceSuppressions(accessLogBucket, [
-      { id: 'AwsSolutions-S1', reason: 'This is the access log destination bucket itself' },
-    ]);
-    // IAM5: wildcard permissions auto-generated by CDK grant methods
-    NagSuppressions.addResourceSuppressions(
-      [taskRole, sfnRole],
-      [{ id: 'AwsSolutions-IAM5', reason: 'Wildcard permissions generated by CDK grant helpers for S3, ECS operations' }],
-      true,
-    );
-    NagSuppressions.addResourceSuppressions(dbCluster, [
-      { id: 'AwsSolutions-IAM4', appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole'], reason: 'Standard RDS Enhanced Monitoring managed policy' },
-    ], true);
-    if (osDomain) {
-      NagSuppressions.addResourceSuppressions(osDomain, [
-        { id: 'AwsSolutions-OS3', reason: 'Domain is in private subnet, accessed only from ECS tasks via security group' },
-        { id: 'AwsSolutions-OS4', reason: 'Small-scale full-text search; dedicated master not needed for 2-node cluster' },
-        { id: 'AwsSolutions-OS5', reason: 'Fine-grained access control enabled with basic auth; no anonymous access' },
-        { id: 'AwsSolutions-OS9', reason: 'Slow logs not needed for full-text search index', appliesTo: ['LogExport::SEARCH_SLOW_LOGS', 'LogExport::INDEX_SLOW_LOGS'] },
-      ]);
+    applyNagSuppressions({
+      albSg: network.albSg, executionRole, taskRole, sfnRole, auditFn,
+      secrets: this.collectSecrets([dbSecret, cacheSecret, adminSecret, onlyofficeSecret], featureSecrets),
+      taskDefinitions: [nextcloud.taskDefinition, apacheTd, notifyTd, ...optional.taskDefinitions],
+      accessLogBucket, dbCluster, osDomain, talkNlb: optional.talkNlb,
+    });
+  }
+
+  /**
+   * Import the Route 53 hosted zone when both id and name are configured.
+   *
+   * @param config - Deployment parameters.
+   * @returns Hosted zone, or undefined.
+   */
+  private resolveHostedZone(config: StackConfig): route53.IHostedZone | undefined {
+    if (!config.hostedZoneId || !config.hostedZoneName) {
+      return undefined;
     }
-    if (enableTalk) {
-      NagSuppressions.addResourceSuppressions(this.node.findChild('TalkNlb'), [
-        { id: 'AwsSolutions-ELB2', reason: 'NLB for TURN/UDP relay; access logs not critical for UDP traffic' },
-      ], true);
+    return route53.HostedZone.fromHostedZoneAttributes(this, 'Zone', {
+      hostedZoneId: config.hostedZoneId,
+      zoneName: config.hostedZoneName,
+    });
+  }
+
+  /**
+   * Create OnlyOffice, Imaginary and Talk according to the feature flags.
+   *
+   * @param input - Shared resources and feature flags.
+   * @returns Task definitions needing the ECS2 exception, and the Talk NLB.
+   */
+  private buildOptionalServices(input: OptionalServicesInput): OptionalServices {
+    const { config, ctx, common, featureSecrets: s } = input;
+    const taskDefinitions: ecs.TaskDefinition[] = [];
+    let talkNlb: elbv2.NetworkLoadBalancer | undefined;
+
+    if (config.enableOnlyOffice) {
+      buildOnlyOfficeService(ctx, config, common, input.files, input.onlyofficeSecret);
     }
+    if (config.enableImaginary && s.imaginarySecret) {
+      taskDefinitions.push(buildImaginaryService(ctx, config, common, s.imaginarySecret));
+    }
+    if (config.enableTalk && s.talkSecret && s.signalingSecret && s.talkInternalSecret) {
+      const talk = buildTalkService(this, config, common, {
+        vpc: input.network.vpc,
+        cluster: ctx.cluster,
+        namespace: ctx.namespace,
+        ecsSg: ctx.ecsSg,
+        executionRole: common.executionRole,
+        hostedZone: input.hostedZone,
+        talkSecret: s.talkSecret,
+        signalingSecret: s.signalingSecret,
+        talkInternalSecret: s.talkInternalSecret,
+      });
+      taskDefinitions.push(talk.taskDefinition);
+      talkNlb = talk.nlb;
+    }
+    return { taskDefinitions, talkNlb };
+  }
+
+  /**
+   * Secrets subject to the rotation (SMG4) exception.
+   *
+   * @param base - Secrets that always exist.
+   * @param s - Optional feature secrets.
+   * @returns All existing secrets.
+   */
+  private collectSecrets(base: secretsmanager.ISecret[], s: FeatureSecrets): secretsmanager.ISecret[] {
+    const optional = [s.osSecret, s.imaginarySecret, s.talkSecret, s.signalingSecret, s.talkInternalSecret];
+    return [...base, ...optional.filter((secret): secret is secretsmanager.Secret => secret !== undefined)];
   }
 }

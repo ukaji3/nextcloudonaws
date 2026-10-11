@@ -7,7 +7,8 @@
   "context": {
     "domain": "cloud.example.com",
     "certificateArn": "",
-    "aioImageTag": "20260218_123804",
+    "aioImageTag": "20260929_105435",
+    "aioNotifyPushImageTag": "20260218_123804",
     "nextcloudImageUri": "",
     "apachePort": 11000,
     "enableOnlyOffice": "true",
@@ -17,6 +18,11 @@
     "enableClamav": "false",
     "auroraMinAcu": 0.5,
     "auroraMaxAcu": 16,
+    "alarmEmails": "",
+    "auroraBackupRetentionDays": 7,
+    "backupDailyRetentionDays": 35,
+    "backupWeeklyRetentionDays": 90,
+    "ecrScanRepositories": "aio-nextcloud",
     "githubOwner": "ukaji3",
     "githubRepo": "nextcloudonaws",
     "githubBranch": "main"

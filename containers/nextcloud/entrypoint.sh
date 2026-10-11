@@ -1062,45 +1062,19 @@ else
 fi
 
 # --- AWS deployment customizations start (nextcloudonaws) ---
-# Repair custom_apps directories that ended up with a nested layout
-# (custom_apps/<app>/<app>/appinfo/info.xml instead of
-# custom_apps/<app>/appinfo/info.xml). Such a layout makes occ unable to
-# find the app ("Could not find <app>"), which in turn causes
-# "The <app> app could not be re-enabled" during upgrades.
-# The repair is idempotent: healthy app directories are left untouched.
-repair_nested_custom_apps() {
-    local app_dir app_id tmp_dir
-    for app_dir in /var/www/html/custom_apps/*/; do
-        [ -d "$app_dir" ] || continue
-        app_id="$(basename "$app_dir")"
-        # Healthy app directory -> nothing to do
-        if [ -f "${app_dir}appinfo/info.xml" ]; then
-            continue
-        fi
-        # Broken layout with a valid nested app -> move the nested app up
-        if [ -f "${app_dir}${app_id}/appinfo/info.xml" ]; then
-            echo "Repairing nested app directory layout for '$app_id'..."
-            tmp_dir="/var/www/html/custom_apps/.repair-${app_id}"
-            rm -rf "$tmp_dir"
-            if mv "${app_dir}${app_id}" "$tmp_dir" \
-                && rm -rf "/var/www/html/custom_apps/${app_id}" \
-                && mv "$tmp_dir" "/var/www/html/custom_apps/${app_id}"; then
-                echo "Repaired app directory for '$app_id'."
-                # Re-enable the app if it was auto-disabled while broken
-                if [ "$(php /var/www/html/occ config:app:get "$app_id" enabled)" = 'no' ]; then
-                    if ! php /var/www/html/occ app:enable "$app_id"; then
-                        echo "Could not re-enable '$app_id' after repairing its directory."
-                    fi
-                fi
-            else
-                echo "Failed to repair app directory for '$app_id'. Manual intervention required."
-            fi
-        else
-            echo "App directory '$app_id' has no appinfo/info.xml and no nested app; skipping (manual check recommended)."
-        fi
-    done
+# Repair custom_apps directories that Nextcloud's updater left nested on EFS
+# (custom_apps/<app>/<app>/...). See /aws-custom-apps-repair.sh for the
+# root-cause analysis. After a repair the app code may be newer than the
+# installed version, so run the pending upgrade as well.
+# shellcheck source=aws-custom-apps-repair.sh
+. /aws-custom-apps-repair.sh
+aws_repair_custom_apps_and_upgrade() {
+    aws_repair_nested_custom_apps
+    if [ "$AWS_REPAIRED_APPS_COUNT" -gt 0 ]; then
+        run_upgrade_if_needed_due_to_app_update
+    fi
 }
-repair_nested_custom_apps
+aws_repair_custom_apps_and_upgrade
 # --- AWS deployment customizations end (nextcloudonaws) ---
 
 # Fulltextsearch
@@ -1141,8 +1115,20 @@ if [ "$FULLTEXTSEARCH_ENABLED" = 'yes' ]; then
         elif [ "$SKIP_UPDATE" != 1 ]; then
             php /var/www/html/occ app:update files_fulltextsearch
         fi
+        # --- AWS deployment customizations start (nextcloudonaws) ---
+        # The app:update calls above can leave a nested layout on EFS; repair before configuring.
+        aws_repair_custom_apps_and_upgrade
+        # --- AWS deployment customizations end (nextcloudonaws) ---
         php /var/www/html/occ fulltextsearch:configure '{"search_platform":"OCA\\FullTextSearch_Elasticsearch\\Platform\\ElasticSearchPlatform"}'
-        php /var/www/html/occ fulltextsearch_elasticsearch:configure "{\"elastic_host\":\"$FULLTEXTSEARCH_PROTOCOL://$FULLTEXTSEARCH_USER:$FULLTEXTSEARCH_PASSWORD@$FULLTEXTSEARCH_HOST:$FULLTEXTSEARCH_PORT\",\"elastic_index\":\"$FULLTEXTSEARCH_INDEX\"}"
+        # --- AWS deployment customizations start (nextcloudonaws) ---
+        # The command echoes the resulting configuration, including elastic_host with the
+        # OpenSearch admin password. Keep it out of CloudWatch Logs; report only success/failure.
+        if php /var/www/html/occ fulltextsearch_elasticsearch:configure "{\"elastic_host\":\"$FULLTEXTSEARCH_PROTOCOL://$FULLTEXTSEARCH_USER:$FULLTEXTSEARCH_PASSWORD@$FULLTEXTSEARCH_HOST:$FULLTEXTSEARCH_PORT\",\"elastic_index\":\"$FULLTEXTSEARCH_INDEX\"}" > /dev/null 2>&1; then
+            echo "Configured fulltextsearch_elasticsearch (output suppressed: contains credentials)."
+        else
+            echo "WARNING: fulltextsearch_elasticsearch:configure failed (output suppressed: contains credentials)."
+        fi
+        # --- AWS deployment customizations end (nextcloudonaws) ---
         php /var/www/html/occ files_fulltextsearch:configure "{\"files_pdf\":true,\"files_office\":true}"
 
         # --- AWS deployment customizations start (nextcloudonaws) ---
@@ -1224,12 +1210,17 @@ if [ "$WHITEBOARD_ENABLED" = 'yes' ]; then
         php /var/www/html/occ app:update whiteboard
     fi
     php /var/www/html/occ config:app:set whiteboard collabBackendUrl --value="https://$NC_DOMAIN/whiteboard"
-    php /var/www/html/occ config:app:set whiteboard jwt_secret_key --value="$WHITEBOARD_SECRET"
+    php /var/www/html/occ config:app:set whiteboard jwt_secret_key --no-interaction --type=string --value="$WHITEBOARD_SECRET"
 else
     if [ "$REMOVE_DISABLED_APPS" = yes ] && [ -d "/var/www/html/custom_apps/whiteboard" ]; then
         php /var/www/html/occ app:remove whiteboard
     fi
 fi
+
+# --- AWS deployment customizations start (nextcloudonaws) ---
+# Final pass after every app:install/app:update above (e.g. whiteboard).
+aws_repair_custom_apps_and_upgrade
+# --- AWS deployment customizations end (nextcloudonaws) ---
 
 # Remove the update skip file always
 rm -f "$NEXTCLOUD_DATA_DIR"/skip.update

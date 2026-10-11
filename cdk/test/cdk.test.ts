@@ -116,4 +116,90 @@ describe('NextcloudAioStack', () => {
       }));
     });
   });
+
+  describe('Alarm notifications', () => {
+    const alarms = template.findResources('AWS::CloudWatch::Alarm');
+    // Application Auto Scaling の TargetTracking アラームは CFN 外なので対象はスタック定義の全アラーム
+    const alarmEntries = Object.entries(alarms);
+
+    test('KMS 暗号化された SNS トピックが存在する', () => {
+      template.hasResourceProperties('AWS::SNS::Topic', Match.objectLike({
+        KmsMasterKeyId: Match.anyValue(),
+      }));
+    });
+
+    test('全アラームが ALARM と OK を SNS に通知する', () => {
+      expect(alarmEntries.length).toBeGreaterThanOrEqual(11);
+      for (const [, alarm] of alarmEntries) {
+        const props = (alarm as { Properties: Record<string, unknown> }).Properties;
+        expect(props.AlarmActions).toHaveLength(1);
+        expect(props.OKActions).toHaveLength(1);
+      }
+    });
+
+    test('全アラームが TreatMissingData を明示している（ResponseTime フラップ回帰）', () => {
+      for (const [, alarm] of alarmEntries) {
+        const props = (alarm as { Properties: Record<string, unknown> }).Properties;
+        expect(props.TreatMissingData).toBeDefined();
+      }
+      template.hasResourceProperties('AWS::CloudWatch::Alarm', Match.objectLike({
+        MetricName: 'TargetResponseTime',
+        TreatMissingData: 'notBreaching',
+      }));
+    });
+
+    test('alarmEmails を指定するとメール購読が作成される', () => {
+      const app = new cdk.App({ context: { ...testContext, alarmEmails: 'ops@example.com, oncall@example.com' } });
+      const stack = new NextcloudAioStack(app, 'MailStack', {
+        env: { account: '111122223333', region: 'us-east-1' },
+      });
+      const t = Template.fromStack(stack);
+      t.resourceCountIs('AWS::SNS::Subscription', 2);
+      t.hasResourceProperties('AWS::SNS::Subscription', { Protocol: 'email', Endpoint: 'ops@example.com' });
+    });
+  });
+
+  describe('Data protection', () => {
+    test('Aurora の自動バックアップ保持期間が既定 7 日', () => {
+      template.hasResourceProperties('AWS::RDS::DBCluster', Match.objectLike({
+        BackupRetentionPeriod: 7,
+      }));
+    });
+
+    test('AWS Backup プランが日次 35 日・週次 90 日で存在する', () => {
+      template.hasResourceProperties('AWS::Backup::BackupPlan', Match.objectLike({
+        BackupPlan: Match.objectLike({
+          BackupPlanRule: Match.arrayWith([
+            Match.objectLike({ RuleName: 'Daily', Lifecycle: { DeleteAfterDays: 35 } }),
+            Match.objectLike({ RuleName: 'Weekly', Lifecycle: { DeleteAfterDays: 90 } }),
+          ]),
+        }),
+      }));
+    });
+
+    test('バックアップ対象に EFS と Aurora が含まれる', () => {
+      const selections = JSON.stringify(template.findResources('AWS::Backup::BackupSelection'));
+      expect(selections).toContain('elasticfilesystem');
+      expect(selections).toContain(':cluster:');
+    });
+
+    test('Backup Vault は KMS 暗号化され、スタック削除時も保持される', () => {
+      template.hasResource('AWS::Backup::BackupVault', Match.objectLike({
+        DeletionPolicy: 'Retain',
+        Properties: Match.objectLike({ EncryptionKeyArn: Match.anyValue() }),
+      }));
+    });
+  });
+
+  describe('Image scanning', () => {
+    test('aio-nextcloud がプッシュ時スキャン対象', () => {
+      template.hasResourceProperties('AWS::ECR::RegistryScanningConfiguration', {
+        ScanType: 'BASIC',
+        Rules: [{
+          ScanFrequency: 'SCAN_ON_PUSH',
+          RepositoryFilters: [{ Filter: 'aio-nextcloud', FilterType: 'WILDCARD' }],
+        }],
+      });
+    });
+  });
 });

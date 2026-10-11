@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:latest
-FROM php:8.3.32-fpm-alpine3.24
+FROM php:8.3.33-fpm-alpine3.24
 
 ENV PHP_MEMORY_LIMIT=512M
 ENV PHP_UPLOAD_LIMIT=16G
@@ -10,7 +10,7 @@ ENV REDIS_DB_INDEX=0
 ENV AIO_LOG_LEVEL=error
 
 # AIO settings start # Do not remove or change this line!
-ENV NEXTCLOUD_VERSION=33.0.7
+ENV NEXTCLOUD_VERSION=33.0.9
 # AIO settings end # Do not remove or change this line!
 
 COPY --chmod=775 containers/nextcloud/*.sh /
@@ -233,6 +233,9 @@ RUN set -ex; \
         git \
         postgresql-client \
         tzdata \
+# su-exec: used by the container scripts (upstream AIO replaced sudo with su-exec).
+# sudo: kept until the upgrade state machine (cdk) stops calling "sudo -E -u www-data".
+        su-exec \
         sudo \
         grep \
         nodejs \
@@ -279,11 +282,11 @@ RUN set -ex; \
     chmod -R 777 /nc-updater
 
 # hadolint ignore=DL3002
-USER root
+USER root:root
 ENTRYPOINT ["/start.sh"]
 CMD ["/usr/bin/supervisord", "-c", "/supervisord.conf"]
 
-HEALTHCHECK CMD /healthcheck.sh
+HEALTHCHECK CMD ["/healthcheck.sh"]
 LABEL com.centurylinklabs.watchtower.enable="false" \
     wud.watch="false" \
     org.label-schema.vendor="Nextcloud"

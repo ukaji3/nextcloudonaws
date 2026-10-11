@@ -21,8 +21,9 @@ Nextcloud を AWS ECS Fargate 上にデプロイするためのプロジェク�
 
 - **自動 TLS**: Route 53 ホストゾーン指定で ACM 証明書発行・DNS レコード作成を自動化
 - **コスト最適化**: S3 Intelligent-Tiering、OpenSearch Service プロビジョンド
-- **運用監視**: CloudWatch Alarms (11件)、Dashboard、ログメトリクスフィルター、Aurora Performance Insights
-- **セキュリティ**: CDK Nag (AwsSolutions) 準拠、VPC Flow Log、ALB/S3 アクセスログ
+- **運用監視**: CloudWatch Alarms (11件、SNS で ALARM/OK を通知)、Dashboard、ログメトリクスフィルター、Aurora Performance Insights
+- **データ保護**: AWS Backup（EFS + Aurora、日次 35 日 / 週次 90 日）、Aurora PITR 7 日、S3 バージョニング
+- **セキュリティ**: CDK Nag (AwsSolutions) 準拠、VPC Flow Log、ALB/S3 アクセスログ、ECR プッシュ時脆弱性スキャン
 - **アップグレード自動化**: Step Functions によるローリングアップグレード（手動起動。CodePipeline による CI/CD は未実装）
 
 ## ディレクトリ構成
@@ -37,12 +38,13 @@ docs/                    デプロイメントガイド
 
 | ファイル | 変更内容 |
 |---|---|
-| `containers/nextcloud/Dockerfile` | `app/` 依存除去、COPY パス変更、AIO_TOKEN/AIO_URL 削除、aws-cli 追加（アップグレード SFN の config.php バックアップ用）、`AIO_LOG_LEVEL` デフォルト定義、redis-patch.php/diag.php の COPY |
+| `containers/nextcloud/Dockerfile` | `app/` 依存除去、COPY パス変更、AIO_TOKEN/AIO_URL 削除、aws-cli 追加（アップグレード SFN の config.php バックアップ用）、`AIO_LOG_LEVEL` デフォルト定義、redis-patch.php/diag.php の COPY、sudo を su-exec と併存（SFN が `sudo -E -u www-data` を使用） |
 | `containers/nextcloud/config/redis.config.php` | ElastiCache Serverless 用に全面書き換え（`REDIS_TLS_ENABLED` による TLS 接続、クラスタモード設定） |
-| `containers/nextcloud/entrypoint.sh` | rsync に `--inplace` 付与（EFS 対応）、custom_apps 入れ子ディレクトリの自己修復（`repair_nested_custom_apps`、Fulltextsearch ブロック直前）、OpenSearch 互換パッチ（ProductCheckTrait / EndpointTrait 呼び出し無効化 / highlight `max_analyzer_offset`、Fulltextsearch configure 直後）、末尾に AWS 固有ブロック（redis-patch 適用・diag.php 配置・redis セッションハンドラ除去・redis.config.php 保全・PHP-FPM 追加設定） |
+| `containers/nextcloud/entrypoint.sh` | rsync に `--inplace` 付与（EFS 対応）、custom_apps 入れ子ディレクトリの自己修復（`aws_repair_custom_apps_and_upgrade` を3箇所で実行）、OpenSearch 互換パッチ（ProductCheckTrait / EndpointTrait 呼び出し無効化 / highlight `max_analyzer_offset`）、`fulltextsearch_elasticsearch:configure` の出力抑止（資格情報をログに出さない）、末尾に AWS 固有ブロック（redis-patch 適用・diag.php 配置・redis セッションハンドラ除去・redis.config.php 保全・PHP-FPM 追加設定） |
+| `containers/nextcloud/aws-custom-apps-repair.sh` | 独自追加。EFS 上でアプリ更新後に生じる入れ子ディレクトリの修復ライブラリ（テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/redis-patch.php` / `diag.php` | 独自追加（upstream に存在しない） |
 
-同期状況: upstream AIO の Nextcloud 33 ベース（2026-07 時点 main）に追従済み。
+同期状況: Nextcloud 33.0.9 / PHP 8.3.33。start.sh・notify.sh・notify-all.sh・root.motd・supervisord.conf・upgrade-latest-major.sh は upstream AIO の Nextcloud 33 系最終コミット `aeecdd73`（2026-08-25、34 への移行直前）と同一。upstream は以降 Nextcloud 34/35・PHP 8.4・dinit に移行しており未追従。
 
 ## デプロイ
 
@@ -64,8 +66,21 @@ npx cdk deploy
 | `enableOnlyOffice` | OnlyOffice の有効化 |
 | `enableFulltextsearch` | OpenSearch Service + 全文検索の有効化 |
 | `auroraMinAcu` / `auroraMaxAcu` | Aurora Serverless v2 の ACU 範囲 |
+| `alarmEmails` | アラーム通知先メール（カンマ区切り）。空なら購読なし |
+| `auroraBackupRetentionDays` | Aurora 自動バックアップの保持日数（既定 7） |
+| `backupDailyRetentionDays` / `backupWeeklyRetentionDays` | AWS Backup の保持日数（既定 35 / 90） |
+| `ecrScanRepositories` | プッシュ時スキャン対象の ECR リポジトリ（既定 `aio-nextcloud`） |
+| `aioImageTag` / `aioNotifyPushImageTag` | AIO 周辺イメージのタグ（notify-push は互換性のため別管理） |
 
 詳細は [docs/aws-deployment.md](docs/aws-deployment.md) を参照。
+
+### 開発時のチェック
+
+```bash
+cd cdk
+npm run lint && npx tsc --noEmit && npm test && npx cdk diff
+bash ../containers/nextcloud/tests/test-aws-custom-apps-repair.sh
+```
 
 ## バージョンアップ
 
@@ -93,13 +108,13 @@ aws sqs receive-message --queue-url <UpgradeQueueUrl> --wait-time-seconds 20
 
 4. `cdk.json` の `nextcloudImageUri` を新しいタグに更新し `npx cdk deploy` する（旧タスクは停止済みのため、新イメージの entrypoint が安全に `occ upgrade` を実行する）
 
-5. deploy 完了後、トークンで実行を再開する（検証 → maintenance OFF → 完了）
+5. 新タスクのログで `occ upgrade` の完了（`Update successful`）を確認してから、トークンで実行を再開する（検証 → maintenance OFF → 完了）
 
 ```bash
 aws stepfunctions send-task-success --task-token '<taskToken>' --task-output '{}'
 ```
 
-失敗時はステートマシンが desired count を復元する（ベストエフォート）。DB の復旧はスナップショット `pre-upgrade-<executionId>` から行う。
+失敗時はステートマシンが desired count を復元する（ベストエフォート）。DB の復旧はスナップショット `pre-upgrade-<executionId>` から、EFS は AWS Backup の復旧ポイントから行う。アップグレードの間（33.0.7 → 33.0.9 で約 57 分）はサービスが停止する。
 
 ## upstream の更新追従
 

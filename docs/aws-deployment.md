@@ -26,7 +26,7 @@ Nextcloud AIO のコンテナイメージを AWS ECS Fargate 上でデプロイ�
 
 - **CloudFront は使用しない** — Nextcloud は WebDAV プロトコル（PROPFIND, MKCOL, MOVE, LOCK 等）を使用するが、CloudFront はこれらの HTTP メソッドをサポートしていない
 - **Collabora は使用しない** — `CAP_SYS_ADMIN` / `SYS_CHROOT` が必要だが Fargate は非対応。代わりに OnlyOffice を使用する
-- **notify_push は無効** — ローカル Redis (127.0.0.1:6379) が必要だが ECS Fargate では利用不可。デスクトップ/モバイルクライアントは最大30秒間隔のポーリングで同期する
+- **notify_push は機能していない** — notify-push サービスは起動しているが、self-test が Redis タイムアウトで失敗する（15 章参照）。デスクトップ/モバイルクライアントは最大30秒間隔のポーリングで同期する
 - **DB/Redis/ファイルストレージは全て AWS マネージドサービスに外部化** — コンテナをステートレスにし、水平スケーリングを可能にする
 - **シークレットは Secrets Manager で管理** — DB パスワード、OpenSearch パスワード、OnlyOffice JWT シークレット等は全て Secrets Manager に格納し、ECS タスク定義から参照する
 
@@ -743,6 +743,9 @@ HTTPS:                 強制
 |---|---|---|
 | `containers/nextcloud/config/redis.config.php` | 修正 | ElastiCache Serverless 用 TLS + RedisCluster 対応（セクション 4.1 参照） |
 | `containers/nextcloud/entrypoint.sh` | 修正 | 下記の変更を含む |
+| `containers/nextcloud/aws-custom-apps-repair.sh` | 追加 | custom_apps 入れ子ディレクトリの修復ライブラリ（10.2 参照） |
+| `containers/nextcloud/tests/test-aws-custom-apps-repair.sh` | 追加 | 上記ライブラリのテスト（`bash containers/nextcloud/tests/test-aws-custom-apps-repair.sh`） |
+| `containers/nextcloud/Dockerfile` | 修正 | aws-cli 追加、su-exec と sudo を併存（SFN が `sudo -E -u www-data` を使用するため） |
 
 ### 10.1 entrypoint.sh の変更内容
 
@@ -750,12 +753,25 @@ HTTPS:                 強制
 |---|---|
 | `redis-session.ini` の削除 | ElastiCache Serverless (TLS/クラスタモード) と非互換な `session.save_handler=redis` 設定を除去。セッションはファイルベースに変更 |
 | `redis.config.php` の保持 | 環境変数から Redis 設定を自動構成するファイル。誤削除を防止 |
-| notify_push の無効化 | ローカル Redis (127.0.0.1:6379) が必要だが ECS Fargate では利用不可 |
-| `elastic_host` の強制更新 | `fulltextsearch_elasticsearch:configure` が既存値を上書きしないため、`config:app:set` で毎回更新 |
+| custom_apps 入れ子修復（3箇所） | 10.2 参照。Imaginary ブロック後・全文検索アプリ更新後・スクリプト末尾で実行し、修復した場合は `occ upgrade` も実行 |
+| `fulltextsearch_elasticsearch:configure` の出力抑止 | 出力に `elastic_host`（OpenSearch の admin パスワードを含む）が出るため、CloudWatch Logs には成否のみ出力 |
 | OpenSearch 互換パッチ (ProductCheckTrait) | `X-Elastic-Product` ヘッダーチェックをスキップ |
-| OpenSearch 互換パッチ (EndpointTrait) | `vnd.elasticsearch+json` Content-Type ヘッダー変換を無効化 |
+| OpenSearch 互換パッチ (EndpointTrait) | 互換ヘッダー付与（`vnd.elasticsearch+json`）の呼び出し行を無効化。適用できない場合は WARNING を出力 |
 | OpenSearch 互換パッチ (max_analyzed_offset) | ハイライトフィールド名を OpenSearch 互換に置換 |
 | ログ出力対応 (`NEXTCLOUD_LOG_TYPE`) | `errorlog` 指定で PHP stderr に出力 → CloudWatch Logs に転送 |
+
+### 10.2 custom_apps 入れ子ディレクトリ問題
+
+Nextcloud のアプリ更新処理（`lib/private/Installer.php`）は旧ディレクトリを `\OCP\Files::rmdirr()` で削除してから新版をコピーする。EFS (NFSv4.1) 上ではこの削除がファイルを1つ取りこぼすことがあり（実機で再現確認済み）、削除失敗が無視された結果 `custom_apps/<app>/<app>/appinfo/info.xml` という入れ子構造になる。この状態ではアプリが認識されず（`Could not find <app>`）、全文検索などが黙って停止する。
+
+`aws-custom-apps-repair.sh` は次の手順で修復する:
+
+1. `appinfo/info.xml` が無く、`<app>/<app>/appinfo/info.xml` があるディレクトリを検出
+2. 内側のアプリを退避 → 壊れた外側ディレクトリを rename で脇へ移動 → 内側を正位置へ移動（rename のみのため、削除に失敗してもアプリは失われない）
+3. 脇へ移した残骸を再試行付きで削除（残った場合は次回起動時に再削除）
+4. 自動無効化されていたアプリを再有効化
+
+正常なアプリには触れないため、何度実行しても結果は同じ（冪等）。
 
 ---
 
@@ -838,8 +854,9 @@ npm install
     "certificateArn": "",
     "hostedZoneId": "Z1234567890ABC",
     "hostedZoneName": "example.com",
-    "aioImageTag": "20260218_123804",
-    "nextcloudImageUri": "<ACCOUNT_ID>.dkr.ecr.ap-northeast-1.amazonaws.com/aio-nextcloud:latest",
+    "aioImageTag": "20260929_105435",
+    "aioNotifyPushImageTag": "20260218_123804",
+    "nextcloudImageUri": "<ACCOUNT_ID>.dkr.ecr.ap-northeast-1.amazonaws.com/aio-nextcloud:nc33.0.9-<timestamp>",
     "apachePort": 11000,
     "enableOnlyOffice": "true",
     "enableTalk": "true",
@@ -848,6 +865,11 @@ npm install
     "enableClamav": "false",
     "auroraMinAcu": 0.5,
     "auroraMaxAcu": 16,
+    "alarmEmails": "ops@example.com",
+    "auroraBackupRetentionDays": 7,
+    "backupDailyRetentionDays": 35,
+    "backupWeeklyRetentionDays": 90,
+    "ecrScanRepositories": "aio-nextcloud",
     "githubOwner": "<your-github-user>",
     "githubRepo": "nextcloudonaws",
     "githubBranch": "main"
@@ -861,152 +883,138 @@ npm install
 | `certificateArn` | ACM 証明書の ARN（空の場合、`hostedZoneId` 指定時は自動発行） |
 | `hostedZoneId` | Route 53 ホストゾーン ID（指定時は DNS レコード自動作成） |
 | `hostedZoneName` | Route 53 ホストゾーン名（例: `example.com`） |
+| `aioImageTag` | AIO イメージ（apache / onlyoffice / imaginary / talk）のタグ |
+| `aioNotifyPushImageTag` | notify-push イメージのタグ。2026-01 以降の upstream は起動方式が変わり（`/var/www/html/config/config.php` を直接読む）、本スタックのマウント（`/nextcloud`）と合わないため旧タグに固定している |
 | `nextcloudImageUri` | カスタムビルドした Nextcloud イメージの URI（空の場合は公式イメージ） |
 | `enableOnlyOffice` | OnlyOffice の有効化 |
 | `enableTalk` | Talk (TURN/シグナリング) の有効化 |
 | `enableFulltextsearch` | OpenSearch Service + 全文検索の有効化 |
 | `enableImaginary` | Imaginary (画像処理) の有効化 |
 | `auroraMinAcu` / `auroraMaxAcu` | Aurora Serverless v2 の ACU 範囲 |
-| `githubOwner` / `githubRepo` / `githubBranch` | CI/CD パイプラインのソースリポジトリ |
+| `alarmEmails` | アラーム通知先のメールアドレス（カンマ区切り）。空なら購読なしで SNS トピックだけ作成。購読は各アドレスに届く確認メールで有効化される |
+| `auroraBackupRetentionDays` | Aurora 自動バックアップ（PITR）の保持日数（既定 7） |
+| `backupDailyRetentionDays` / `backupWeeklyRetentionDays` | AWS Backup の日次 / 週次リカバリポイントの保持日数（既定 35 / 90） |
+| `ecrScanRepositories` | プッシュ時に脆弱性スキャンする ECR リポジトリ名（カンマ区切り、既定 `aio-nextcloud`）。レジストリスキャン設定はアカウント・リージョンで1つのため、同じ環境の他スタックでは定義しないこと |
+| `githubOwner` / `githubRepo` / `githubBranch` | CI/CD パイプラインのソースリポジトリ（パイプラインは現在未作成） |
 
 ### 12.3 デプロイ
 
 ```bash
 npx cdk bootstrap   # 初回のみ
+npm run lint        # ESLint（エラー 0 必須）
+npx tsc --noEmit    # 型チェック
+npm test            # jest（CloudFormation テンプレートの回帰テスト）
+npx cdk diff        # 変更内容の確認（データ系リソースの replace が無いこと）
 npx cdk deploy
+```
+
+コンテナ側の修復ロジックのテスト:
+
+```bash
+bash containers/nextcloud/tests/test-aws-custom-apps-repair.sh
 ```
 
 ### 12.4 作成されるリソース
 
 - VPC (2 AZ, Public/Private/Isolated サブネット)
 - EFS + アクセスポイント
-- Aurora Serverless v2 (PostgreSQL)
+- Aurora Serverless v2 (PostgreSQL、自動バックアップ 7 日)
 - ElastiCache Serverless (Valkey)
-- S3 バケット（Intelligent-Tiering + アクセスログバケット）
+- S3 バケット（Intelligent-Tiering + バージョニング + アクセスログバケット）
 - OpenSearch Service ドメイン（enableFulltextsearch 時）
 - ECS Fargate クラスター + Cloud Map 名前空間
-- ECS Service: Nextcloud, Apache, Notify-push, OnlyOffice（オプション）
+- ECS Service: Nextcloud, Apache, Notify-push, OnlyOffice / Imaginary / Talk（オプション）
 - ALB + HTTPS リスナー
-- Auto Scaling (Nextcloud: 2-10, Apache: 2-5)
+- Auto Scaling (Nextcloud: 1-10, Apache: 2-5)
 - ACM 証明書 + Route 53 Alias レコード（hostedZoneId 指定時）
 - CloudWatch Alarms / Dashboard / ログメトリクスフィルター
-- Step Functions ステートマシン（バージョンアップ自動化）
-- CodePipeline + CodeBuild（CI/CD パイプライン）
-- ECR リポジトリ（Nextcloud カスタムイメージ）
+- SNS トピック（KMS 暗号化、アラーム通知用）
+- AWS Backup（KMS 暗号化 Vault、日次・週次プラン、対象 EFS + Aurora）
+- ECR レジストリスキャン設定（プッシュ時スキャン）
+- Step Functions ステートマシン（バージョンアップ自動化）+ SQS 承認キュー
+
+ECR リポジトリ `aio-nextcloud` はスタック外で作成済みのものを使う（スタックでは作成しない）。
+
+### 12.5 CDK コードの構成
+
+| ファイル | 内容 |
+|---|---|
+| `lib/cdk-stack.ts` | スタック本体（各ビルダーを呼び出して組み立てるだけ） |
+| `lib/stack/config.ts` | context の型付き読み取り |
+| `lib/stack/network.ts` / `storage.ts` / `database.ts` | VPC・SG / EFS・S3 / Aurora・ElastiCache |
+| `lib/stack/feature-secrets.ts` | オプション機能のシークレットと OpenSearch |
+| `lib/stack/iam-and-logging.ts` | タスクロール・実行ロール・ログ・監査ログ転送 |
+| `lib/stack/nextcloud-task.ts` / `web-tier.ts` | Nextcloud タスク定義 / Apache・notify-push・OnlyOffice・Imaginary・Talk |
+| `lib/stack/load-balancer.ts` | ALB・証明書・DNS |
+| `lib/stack/upgrade-state-machine.ts` | アップグレード用 Step Functions |
+| `lib/stack/monitoring.ts` | アラーム・ダッシュボード |
+| `lib/stack/nag-suppressions.ts` | cdk-nag の抑止（理由付き） |
+| `lib/constructs/` | AlarmNotifications / DataBackup / ImageScanning |
+
+ビルダーはすべてスタックを scope に取るため、CloudFormation の論理 ID は分割前と同じ。
 
 ---
 
 ## 13. バージョンアップフロー
 
-CDK に Step Functions ステートマシン (`nextcloud-upgrade`) を含めている。新しいコンテナイメージをビルド・プッシュした後、このステートマシンを実行するとバージョンアップが自動で行われる。
+CDK に Step Functions ステートマシン `nextcloud-upgrade` を含めている。メンテナンスモード・サービス縮退・Aurora スナップショット・config.php バックアップは自動で行い、新イメージの反映（`cdk deploy`）だけを operator が行う 2 フェーズ方式。operator はタスクトークンで処理を再開する。
 
 ### 13.1 フロー
 
 ```
-[1] ExtractExecutionId
-    └── 実行名をスナップショット名に使用
+[Phase 1: 準備（自動）]
+  ExtractExecutionId     実行名をスナップショット名に使用
+  MaintenanceOn          one-off タスクで occ maintenance:mode --on（ExitCode 検査）
+  ScaleDownAll           Nextcloud / Apache / Notify-push → 0
+  CheckTasksStopped      RunningCount = 0 になるまで 15 秒間隔でポーリング
+  CreateSnapshot         Aurora スナップショット pre-upgrade-<実行名>
+  CheckSnapshotStatus    available になるまで 30 秒間隔でポーリング
+  BackupConfig           config.php を EFS（/mnt/ncdata）と S3 にコピー
+  WaitForDeploy          SQS にタスクトークンを送って待機（最大 3 時間）
 
-[2] MaintenanceOn (run-task)
-    └── php occ maintenance:mode --on
-        EFS 上の config/config.php を更新 → 全タスクに即時反映
+[operator]
+  cdk.json の nextcloudImageUri を更新 → npx cdk deploy
+  → 新タスクの entrypoint.sh が occ upgrade を実行
+  → aws stepfunctions send-task-success でトークンを返す
 
-[3] WaitDrain (30秒)
-    └── インフライトリクエストの排出待ち
+[Phase 2: 検証・復帰（自動）]
+  RestoreBaseline        desired count を基準値に戻す（cdk deploy は無変更サービスを戻さないため）
+  CheckTargetsHealthy    ALB ターゲットが healthy になるまで 20 秒間隔でポーリング
+  VerifyUpgrade          occ status（ExitCode 検査）
+  MaintenanceOffFinal    occ maintenance:mode --off
+  UpgradeSucceeded
 
-[4] ScaleDownAll (並列)
-    ├── Nextcloud → 0
-    ├── Apache → 0
-    └── Notify-push → 0
-
-[5] WaitScaleDown (60秒)
-    └── 全タスク停止待ち
-
-[6] CreateSnapshot
-    └── Aurora スナップショット取得
-
-[7] BackupConfig (run-task)
-    └── config/config.php を S3 にコピー
-
-[8] ScaleUpNextcloudOne
-    └── Nextcloud → 1 (新イメージで起動、entrypoint.sh がアップグレード実行)
-
-[9] WaitUpgrade (180秒)
-    └── DB マイグレーション完了待ち
-
-[10] CheckHealth → IsHealthy
-    └── RunningCount >= 1 になるまでポーリング
-
-[11] ScaleUpAll (並列)
-    ├── Nextcloud → 2
-    ├── Apache → 2
-    └── Notify-push → 1
-
-[12] UpgradeSuccess
-
-※ 失敗時は自動ロールバック:
-    → 全サービスを元のスケールに復元
-    → maintenance:mode --off
-    → UpgradeFailed
+※ どのステップで失敗しても RollbackScaleUp → MaintenanceOffRollback → UpgradeFailed
 ```
 
-### 13.2 CI/CD パイプライン
-
-CDK に CodePipeline + CodeBuild を含めている。ビルドからアップグレードまで全自動で実行される。
-
-```
-GitHub (Fork リポジトリ)
-    │ パイプライン手動実行 or Release タグ
-    ▼
-CodePipeline (nextcloud-deploy)
-    │
-    ├─► Source: GitHub からソース取得
-    │
-    └─► BuildAndDeploy (CodeBuild):
-          1. ECR ログイン
-          2. Docker ビルド (Containers/nextcloud/Dockerfile)
-          3. ECR プッシュ (:commit-hash + :latest)
-          4. ECS タスク定義を新イメージで更新
-          5. Step Functions (nextcloud-upgrade) を実行
-              → メンテナンスモード → 縮退 → バックアップ → アップグレード → スケールアップ
-```
-
-#### 事前準備
-
-1. GitHub Personal Access Token を Secrets Manager に登録:
+### 13.2 実行手順
 
 ```bash
-aws secretsmanager create-secret \
-  --name github-token \
-  --secret-string "<your-github-pat>"
+# 1. イメージをビルドして ECR にプッシュ（プッシュ時に脆弱性スキャンが走る）
+aws ecr get-login-password --region <region> | docker login --username AWS --password-stdin <account>.dkr.ecr.<region>.amazonaws.com
+docker build -t <account>.dkr.ecr.<region>.amazonaws.com/aio-nextcloud:<tag> -f containers/nextcloud/Dockerfile .
+docker push <account>.dkr.ecr.<region>.amazonaws.com/aio-nextcloud:<tag>
+aws ecr describe-image-scan-findings --repository-name aio-nextcloud --image-id imageTag=<tag>
+
+# 2. ステートマシンを起動
+aws stepfunctions start-execution \
+  --state-machine-arn arn:aws:states:<region>:<account>:stateMachine:nextcloud-upgrade \
+  --name upgrade-<version>-<yyyymmddhhmm>
+
+# 3. WaitForDeploy に到達したらタスクトークンを受け取る（スタック出力 UpgradeQueueUrl）
+aws sqs receive-message --queue-url <UpgradeQueueUrl> --wait-time-seconds 20
+
+# 4. cdk.json の nextcloudImageUri を <tag> に更新してデプロイ
+cd cdk && npx cdk diff && npx cdk deploy
+
+# 5. 新タスクのログでアップグレード完了（"Update successful"）を確認してから再開
+aws stepfunctions send-task-success --task-token '<taskToken>' --task-output '{}'
+
+# 中止する場合
+aws stepfunctions send-task-failure --task-token '<taskToken>'
 ```
 
-2. `cdk.json` の GitHub 設定を確認:
-
-```json
-{
-  "githubOwner": "ukaji3",
-  "githubRepo": "nextcloud-all-in-one",
-  "githubBranch": "main"
-}
-```
-
-#### 実行方法
-
-```bash
-# パイプラインを手動実行
-aws codepipeline start-pipeline-execution --name nextcloud-deploy
-```
-
-AWS コンソールの CodePipeline 画面から「変更をリリースする」でも実行可能。
-
-#### 処理の流れ
-
-1. CodeBuild が GitHub からソースを取得
-2. `Containers/nextcloud/Dockerfile` でイメージをビルド
-3. ECR にプッシュ（タグ: コミットハッシュ先頭8文字 + latest）
-4. ECS タスク定義の新リビジョンを登録（イメージ URI を差し替え）
-5. Step Functions `nextcloud-upgrade` を自動実行
-6. Step Functions がメンテナンスモード → 縮退 → バックアップ → アップグレード → スケールアップを実行
+所要時間の目安: 2026-10-11 の 33.0.7 → 33.0.9 では、起動から SUCCEEDED まで約 57 分（Phase 1 が約 14 分、`occ upgrade` の code integrity check が約 3 分）。この間サービスは停止する。
 
 ### 13.3 ロールバック
 
@@ -1015,7 +1023,9 @@ AWS コンソールの CodePipeline 画面から「変更をリリースする�
 2. `maintenance:mode --off` を実行
 3. ステートマシンが `Failed` 状態で終了
 
-Aurora スナップショットからの DB 復元が必要な場合は手動で実施:
+このロールバックはベストエフォート。新イメージのデプロイ後に失敗した場合、EFS 上の Nextcloud コードは新版に置き換わっているため、タスク数を戻しても旧版には戻らない。旧版へ戻すには、`nextcloudImageUri` を旧タグに戻したうえで DB と EFS を復元する。
+
+Aurora スナップショットからの DB 復元:
 
 ```bash
 aws rds restore-db-cluster-from-snapshot \
@@ -1024,21 +1034,23 @@ aws rds restore-db-cluster-from-snapshot \
   --engine aurora-postgresql
 ```
 
+EFS（config.php・アプリ）は AWS Backup の復旧ポイント（14.4.1）から復元する。config.php だけなら `/mnt/ncdata/config.php.backup.<timestamp>` または `s3://<DataBucket>/backups/` にもある。
+
 ### 13.4 メンテナンス操作の実行方法
 
-バージョンアップ以外の `occ` コマンドも `run-task` で実行する:
+バージョンアップ以外の `occ` コマンドも `run-task` で実行する。occ は config.php の所有者（www-data）で実行する:
 
 ```bash
 # 例: ファイルスキャン
 aws ecs run-task \
-  --cluster nextcloud-cluster \
-  --task-definition nextcloud-aio-nextcloud \
+  --cluster <Cluster> \
+  --task-definition <NextcloudTd family> \
   --launch-type FARGATE \
   --network-configuration "awsvpcConfiguration={subnets=[...],securityGroups=[...],assignPublicIp=DISABLED}" \
-  --overrides '{"containerOverrides":[{"name":"nextcloud","command":["php","/var/www/html/occ","files:scan","--all"]}]}'
+  --overrides '{"containerOverrides":[{"name":"nextcloud","command":["sudo","-E","-u","www-data","php","/var/www/html/occ","files:scan","--all"]}]}'
 ```
 
-稼働中のタスクに `execute-command` で入るのではなく、常にワンショットタスクを使用する。
+`command` の上書きで置き換わるのは CMD だけで、ENTRYPOINT の `/start.sh` は残る。そのためワンショットタスクでも entrypoint.sh（初期化・アプリ更新・修復）が先に一通り実行され、その後に指定コマンドが動く。調査目的の読み取り操作は、稼働中タスクへの `execute-command`（15 章の TTY 割り当て方法を参照）の方が速い。
 
 ---
 
@@ -1098,7 +1110,30 @@ ECS ログから `ERROR` / `CRITICAL` / `Fatal` を含む行を抽出し、カ�
 | AuroraMemoryAlarm | Aurora 空きメモリ | < 256MB が 15分継続 |
 | ErrorLogAlarm | アプリケーションエラーログ数 | > 50件/10分 |
 
-> **注意**: アラームに SNS トピックは未設定。通知が必要な場合は SNS トピックを作成し、各アラームに `addAlarmAction()` で接続する。
+全アラームは ALARM と OK の遷移を SNS トピック（KMS 暗号化）に通知する。通知先は context `alarmEmails` で指定し、各アドレスに届く確認メールで購読が有効になる。
+
+欠損データの扱い（TreatMissingData）はアラームごとに明示している:
+
+| 扱い | 対象 | 理由 |
+|---|---|---|
+| `notBreaching` | Alb5xx / Target5xx / ResponseTime / UnhealthyTargets / ErrorLog | アクセスが無いとデータポイント自体が出ない。以前は ResponseTime が OK と INSUFFICIENT_DATA を1日に十数回行き来していた |
+| `missing` | ECS / Aurora の CPU・メモリ・容量 | 稼働中は常に出るため、欠損は異常として扱う |
+
+### 14.4.1 バックアップ
+
+| 対象 | 方式 | 保持 |
+|---|---|---|
+| Aurora | 自動バックアップ（PITR） | `auroraBackupRetentionDays`（既定 7 日） |
+| Aurora + EFS | AWS Backup（日次 03:00 JST） | `backupDailyRetentionDays`（既定 35 日） |
+| Aurora + EFS | AWS Backup（週次 日曜 03:00 JST） | `backupWeeklyRetentionDays`（既定 90 日） |
+| S3 | バージョニング | 無期限（旧バージョンも Intelligent-Tiering） |
+| config.php | アップグレード時に EFS と S3 へコピー | 無期限 |
+
+Backup Vault と暗号化キーはスタック削除時も保持される（RETAIN）。
+
+### 14.4.2 イメージの脆弱性スキャン
+
+ECR のレジストリスキャン（BASIC、プッシュ時）を `ecrScanRepositories` のリポジトリに適用する。結果は `aws ecr describe-image-scan-findings` で確認する。
 
 ### 14.5 CloudWatch Dashboard
 
@@ -1141,9 +1176,11 @@ aws ecs execute-command \
 
 | 制約 | 影響 | 回避策 |
 |---|---|---|
-| notify_push 無効 | デスクトップ/モバイルクライアントの同期が最大30秒遅延 | ローカル Redis が必要なため ECS Fargate では利用不可 |
+| notify_push が機能していない | デスクトップ/モバイルクライアントの同期がポーリング（最大30秒）になる | アプリは有効だが `occ notify_push:self-test` が Redis タイムアウトで失敗する（2026-10-11 確認）。notify-push イメージは旧タグに固定している（12.2 の `aioNotifyPushImageTag` 参照） |
+| コンテナのヘルスチェックが `exit 0` 固定 | ECS は起動途中の新タスクを healthy とみなし、旧タスクを先に止める。起動時に `occ upgrade` が走ると、その間（2026-10-11 実績で約19分）502 になる | アップグレードを伴うイメージ更新は 13 章の Step Functions 手順で行う（計画停止として扱う） |
+| アプリ更新で custom_apps が入れ子になる | 該当アプリが認識されず停止する | entrypoint.sh が起動時に自動修復する（10.2 参照） |
 | Collabora 非対応 | ドキュメント編集に Collabora を使用できない | OnlyOffice を使用 |
-| `ecs execute-command` の出力制限 | コンテナに `script` コマンドがなく stdout が取得できない | PHP スクリプトを S3 経由で実行し stderr で結果を取得 |
+| `ecs execute-command` の出力制限 | 擬似 TTY が無いと出力が取れない | `script -qec "aws ecs execute-command ... --interactive --command '...'" /dev/null` で TTY を割り当てる |
 | mail アプリ | vendor ディレクトリが欠損しインストール不可 | `occ app:install mail` で再インストール |
 
 ## 16. Collabora に関する制約事項

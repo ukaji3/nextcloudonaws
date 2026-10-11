@@ -5,10 +5,12 @@ import { AwsSolutionsChecks } from 'cdk-nag';
 import { NextcloudAioStack } from '../lib/cdk-stack';
 
 const app = new cdk.App();
+// An empty CDK_DEFAULT_REGION also falls back to Tokyo.
+const envRegion = process.env.CDK_DEFAULT_REGION;
 new NextcloudAioStack(app, 'NextcloudAioStack', {
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,
-    region: process.env.CDK_DEFAULT_REGION || 'ap-northeast-1',
+    region: envRegion !== undefined && envRegion !== '' ? envRegion : 'ap-northeast-1',
   },
 });
 cdk.Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
