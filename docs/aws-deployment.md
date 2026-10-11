@@ -616,7 +616,22 @@ SSL ポリシー:       ELBSecurityPolicy-TLS13-1-2-2021-06
 aws route53 list-hosted-zones --query 'HostedZones[?Name==`example.com.`].Id' --output text
 ```
 
-### 7.3 Talk 用 NLB (オプション)
+### 7.3 AWS WAF（国別アクセス制限）
+
+ALB に AWS WAF（リージョナル）の Web ACL を関連付け、`wafAllowedCountries`（既定 `JP`）以外の国からのリクエストを遮断する。
+
+| 優先度 | ルール | 動作 |
+|---|---|---|
+| 0 | `AllowVpcEgress` | NAT Gateway の EIP からのリクエストを常に許可（notify_push・OnlyOffice・Nextcloud 自身が VPC 内から公開 URL を呼ぶため） |
+| 1 | `BlockOutsideAllowedCountries` | 接続元 IP の国が許可国以外なら遮断（403） |
+| 既定 | — | 許可 |
+
+- 国の判定には接続元 IP を使う（ALB が入口なので X-Forwarded-For は使わない）
+- ログは遮断したリクエストだけを CloudWatch Logs `aws-waf-logs-<スタック名>`（30 日保持）に記録する。`authorization` / `cookie` / `requesttoken` ヘッダは伏せる
+- 海外渡航中のユーザーや海外の VPN 経由のアクセスも遮断される
+- WAF は ALB だけに効く。Talk の TURN（NLB、3478）は対象外
+
+### 7.4 Talk 用 NLB (オプション)
 
 Talk の TURN サーバーは UDP を使用するため、NLB が必要:
 
@@ -870,6 +885,7 @@ npm install
     "backupDailyRetentionDays": 35,
     "backupWeeklyRetentionDays": 90,
     "ecrScanRepositories": "aio-nextcloud",
+    "wafAllowedCountries": "JP",
     "githubOwner": "<your-github-user>",
     "githubRepo": "nextcloudonaws",
     "githubBranch": "main"
@@ -894,6 +910,7 @@ npm install
 | `alarmEmails` | アラーム通知先のメールアドレス（カンマ区切り）。空なら購読なしで SNS トピックだけ作成。購読は各アドレスに届く確認メールで有効化される |
 | `auroraBackupRetentionDays` | Aurora 自動バックアップ（PITR）の保持日数（既定 7） |
 | `backupDailyRetentionDays` / `backupWeeklyRetentionDays` | AWS Backup の日次 / 週次リカバリポイントの保持日数（既定 35 / 90） |
+| `wafAllowedCountries` | ALB の WAF で許可する国（ISO 3166 alpha-2、カンマ区切り、既定 `JP`）。これ以外の国からのリクエストは 403 で遮断する（7.3 参照） |
 | `ecrScanRepositories` | プッシュ時に脆弱性スキャンする ECR リポジトリ名（カンマ区切り、既定 `aio-nextcloud`）。レジストリスキャン設定はアカウント・リージョンで1つのため、同じ環境の他スタックでは定義しないこと |
 | `githubOwner` / `githubRepo` / `githubBranch` | CI/CD パイプラインのソースリポジトリ（パイプラインは現在未作成） |
 

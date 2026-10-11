@@ -6,6 +6,7 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as servicediscovery from 'aws-cdk-lib/aws-servicediscovery';
 import { Construct } from 'constructs';
 import { DataBackup } from './constructs/data-backup';
+import { GeoRestrictedWebAcl } from './constructs/geo-restricted-web-acl';
 import { ImageScanning } from './constructs/image-scanning';
 import { loadStackConfig, StackConfig } from './stack/config';
 import { buildCache, buildDatabase } from './stack/database';
@@ -126,6 +127,11 @@ export class NextcloudAioStack extends cdk.Stack {
 
     const { alb, apacheTargetGroup } = buildLoadBalancer(this, config, {
       vpc: network.vpc, albSg: network.albSg, accessLogBucket, apacheService: apacheSvc, hostedZone,
+    });
+    new GeoRestrictedWebAcl(this, 'AlbWebAcl', {
+      loadBalancer: alb,
+      allowedCountries: config.wafAllowedCountries,
+      alwaysAllowedIpv4: network.natPublicIps,
     });
 
     const { stateMachine, sfnRole } = buildUpgradeStateMachine(this, {

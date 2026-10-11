@@ -31,6 +31,8 @@ export interface StackConfig {
   readonly backupWeeklyRetentionDays: number;
   /** ECR repositories scanned on push. */
   readonly ecrScanRepositories: readonly string[];
+  /** Countries (ISO 3166 alpha-2) allowed through the ALB web ACL. */
+  readonly wafAllowedCountries: readonly string[];
 }
 
 /**
@@ -149,5 +151,6 @@ export function loadStackConfig(scope: Construct): StackConfig {
     backupDailyRetentionDays: contextNumber(scope, 'backupDailyRetentionDays', 35),
     backupWeeklyRetentionDays: contextNumber(scope, 'backupWeeklyRetentionDays', 90),
     ecrScanRepositories: contextList(scope, 'ecrScanRepositories', 'aio-nextcloud'),
+    wafAllowedCountries: contextList(scope, 'wafAllowedCountries', 'JP'),
   };
 }

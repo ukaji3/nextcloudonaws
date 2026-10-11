@@ -140,6 +140,63 @@ describe('NextcloudAioStack', () => {
     });
   });
 
+  describe('WAF (geo restriction)', () => {
+    test('日本以外を遮断し、NAT Gateway の IP は常に許可する', () => {
+      const acls = Object.values(template.findResources('AWS::WAFv2::WebACL'));
+      expect(acls).toHaveLength(1);
+      const props = (acls[0] as { Properties: { Scope: string; DefaultAction: unknown; Rules: Record<string, unknown>[] } }).Properties;
+      expect(props.Scope).toBe('REGIONAL');
+      expect(props.DefaultAction).toEqual({ Allow: {} });
+      const [first, second] = props.Rules;
+      expect(first.Name).toBe('AllowVpcEgress');
+      expect(first.Action).toEqual({ Allow: {} });
+      expect(second.Name).toBe('BlockOutsideAllowedCountries');
+      expect(second.Action).toEqual({ Block: {} });
+      expect(second.Statement).toEqual({
+        NotStatement: { Statement: { GeoMatchStatement: { CountryCodes: ['JP'] } } },
+      });
+    });
+
+    test('IP セットは全 NAT Gateway の EIP/32', () => {
+      const eipIds = Object.keys(template.findResources('AWS::EC2::EIP'));
+      template.hasResourceProperties('AWS::WAFv2::IPSet', {
+        Addresses: eipIds.map((id) => ({ 'Fn::Join': ['', [{ 'Fn::GetAtt': [id, 'PublicIp'] }, '/32']] })),
+      });
+    });
+
+    test('ALB に関連付けられる', () => {
+      template.resourceCountIs('AWS::WAFv2::WebACLAssociation', 1);
+      const assoc = Object.values(template.findResources('AWS::WAFv2::WebACLAssociation'))[0] as { Properties: { ResourceArn: { Ref: string } } };
+      const albId = Object.keys(template.findResources('AWS::ElasticLoadBalancingV2::LoadBalancer'))
+        .find((id) => id.startsWith('Alb'));
+      expect(assoc.Properties.ResourceArn).toEqual({ Ref: albId });
+    });
+
+    test('遮断ログのみ記録し、資格情報ヘッダを伏せる', () => {
+      template.hasResourceProperties('AWS::WAFv2::LoggingConfiguration', {
+        RedactedFields: [
+          { SingleHeader: { Name: 'authorization' } },
+          { SingleHeader: { Name: 'cookie' } },
+          { SingleHeader: { Name: 'requesttoken' } },
+        ],
+        LoggingFilter: Match.objectLike({ DefaultBehavior: 'DROP' }),
+      });
+      template.hasResourceProperties('AWS::Logs::LogGroup', {
+        LogGroupName: 'aws-waf-logs-TestStack',
+      });
+    });
+
+    test('wafAllowedCountries で許可国を変更できる', () => {
+      const app = new cdk.App({ context: { ...testContext, wafAllowedCountries: 'JP, US' } });
+      const stack = new NextcloudAioStack(app, 'CountryStack', { env: { account: '111122223333', region: 'us-east-1' } });
+      Template.fromStack(stack).hasResourceProperties('AWS::WAFv2::WebACL', Match.objectLike({
+        Rules: Match.arrayWith([Match.objectLike({
+          Statement: { NotStatement: { Statement: { GeoMatchStatement: { CountryCodes: ['JP', 'US'] } } } },
+        })]),
+      }));
+    });
+  });
+
   describe('Nextcloud container health check', () => {
     test('php-fpm の待受を見る実ヘルスチェック（exit 0 固定ではない）', () => {
       const taskDefs = template.findResources('AWS::ECS::TaskDefinition');

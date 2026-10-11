@@ -23,7 +23,7 @@ Nextcloud を AWS ECS Fargate 上にデプロイするためのプロジェク�
 - **コスト最適化**: S3 Intelligent-Tiering、OpenSearch Service プロビジョンド
 - **運用監視**: CloudWatch Alarms (11件、SNS で ALARM/OK を通知)、Dashboard、ログメトリクスフィルター、Aurora Performance Insights
 - **データ保護**: AWS Backup（EFS + Aurora、日次 35 日 / 週次 90 日）、Aurora PITR 7 日、S3 バージョニング
-- **セキュリティ**: CDK Nag (AwsSolutions) 準拠、VPC Flow Log、ALB/S3 アクセスログ、ECR プッシュ時脆弱性スキャン
+- **セキュリティ**: AWS WAF で日本以外からのアクセスを遮断（ALB）、CDK Nag (AwsSolutions) 準拠、VPC Flow Log、ALB/S3 アクセスログ、ECR プッシュ時脆弱性スキャン
 - **アップグレード自動化**: Step Functions によるローリングアップグレード（手動起動。CodePipeline による CI/CD は未実装）
 
 ## ディレクトリ構成
@@ -72,6 +72,7 @@ npx cdk deploy
 | `auroraBackupRetentionDays` | Aurora 自動バックアップの保持日数（既定 7） |
 | `backupDailyRetentionDays` / `backupWeeklyRetentionDays` | AWS Backup の保持日数（既定 35 / 90） |
 | `ecrScanRepositories` | プッシュ時スキャン対象の ECR リポジトリ（既定 `aio-nextcloud`） |
+| `wafAllowedCountries` | ALB に到達できる国（ISO 3166 alpha-2、カンマ区切り、既定 `JP`） |
 | `aioImageTag` / `aioNotifyPushImageTag` | AIO 周辺イメージのタグ（notify-push は省略時 `aioImageTag` と同じ） |
 
 詳細は [docs/aws-deployment.md](docs/aws-deployment.md) を参照。
