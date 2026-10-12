@@ -1,7 +1,17 @@
 import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as ecs from 'aws-cdk-lib/aws-ecs';
+import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
+import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 
 import { NextcloudAioStack } from '../lib/cdk-stack';
+import {
+  CfnResources,
+  ec2PublicPlacementViolations,
+  ecsPublicPlacementViolations,
+  publicSubnetIds,
+} from './network-placement';
 
 /**
  * テスト用の CDK context。
@@ -254,6 +264,100 @@ describe('NextcloudAioStack', () => {
         const value = cs.find((c) => c.Name === name)?.Environment.find((e) => e.Name === 'TURN_DOMAIN')?.Value;
         expect(value).toEqual({ 'Fn::GetAtt': [nlbId, 'DNSName'] });
       }
+    });
+  });
+
+  describe('Network placement (EC2 rule / ECS design)', () => {
+    const resources = template.toJSON().Resources as CfnResources;
+
+    /** Violations found in a small control stack. */
+    interface ControlResult {
+      readonly ec2: string[];
+      readonly ecs: string[];
+    }
+
+    /**
+     * Synthesize a control stack and run both checks on it.
+     *
+     * @param build - Adds the resources under test to the stack.
+     * @returns Violations of both checks.
+     */
+    function checkControl(build: (stack: cdk.Stack, vpc: ec2.Vpc) => void): ControlResult {
+      const app = new cdk.App();
+      const stack = new cdk.Stack(app, 'Control', { env: { account: '111122223333', region: 'us-east-1' } });
+      build(stack, new ec2.Vpc(stack, 'Vpc', { maxAzs: 2 }));
+      const res = Template.fromStack(stack).toJSON().Resources as CfnResources;
+      return { ec2: ec2PublicPlacementViolations(res), ecs: ecsPublicPlacementViolations(res) };
+    }
+
+    test('パブリックサブネットを判定できている（検査が空振りしない）', () => {
+      expect(publicSubnetIds(resources).size).toBe(2);
+    });
+
+    test('EC2 規約: EC2 インスタンスを Public Subnet に置かない（ALB / NLB / NAT G/W は対象外）', () => {
+      expect(ec2PublicPlacementViolations(resources)).toEqual([]);
+    });
+
+    test('ECS 設計: 全サービスと SFN の一時タスクが Public Subnet 外・公開 IP なし', () => {
+      expect(Object.keys(template.findResources('AWS::ECS::Service')).length).toBeGreaterThanOrEqual(6);
+      expect(Object.keys(template.findResources('AWS::StepFunctions::StateMachine')).length).toBe(1);
+      expect(ecsPublicPlacementViolations(resources)).toEqual([]);
+    });
+
+    test('対照: Public Subnet の EC2 インスタンスは違反として検出される', () => {
+      const result = checkControl((stack, vpc) => {
+        new ec2.Instance(stack, 'PublicHost', {
+          vpc,
+          vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
+          instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MICRO),
+          machineImage: ec2.MachineImage.latestAmazonLinux2023(),
+        });
+      });
+      expect(result.ec2.join('\n')).toContain('PublicHost');
+    });
+
+    test('対照: Private Subnet の EC2 インスタンスは違反にならない', () => {
+      const result = checkControl((stack, vpc) => {
+        new ec2.Instance(stack, 'PrivateHost', {
+          vpc,
+          vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+          instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MICRO),
+          machineImage: ec2.MachineImage.latestAmazonLinux2023(),
+        });
+      });
+      expect(result.ec2).toEqual([]);
+    });
+
+    test('対照: 公開 IP 付きで Public Subnet に置いた ECS サービスは検出される', () => {
+      const result = checkControl((stack, vpc) => {
+        const td = new ecs.FargateTaskDefinition(stack, 'Td');
+        td.addContainer('app', { image: ecs.ContainerImage.fromRegistry('public.ecr.aws/docker/library/busybox:latest') });
+        new ecs.FargateService(stack, 'PublicSvc', {
+          cluster: new ecs.Cluster(stack, 'Cluster', { vpc }),
+          taskDefinition: td,
+          assignPublicIp: true,
+          vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
+        });
+      });
+      expect(result.ecs.some((v) => v.includes('assigns a public IP'))).toBe(true);
+      expect(result.ecs.some((v) => v.includes('public subnet'))).toBe(true);
+    });
+
+    test('対照: 公開 IP 付きで Public Subnet に置いた SFN の RunTask は検出される', () => {
+      const result = checkControl((stack, vpc) => {
+        const td = new ecs.FargateTaskDefinition(stack, 'Td');
+        td.addContainer('app', { image: ecs.ContainerImage.fromRegistry('public.ecr.aws/docker/library/busybox:latest') });
+        const run = new tasks.EcsRunTask(stack, 'Run', {
+          cluster: new ecs.Cluster(stack, 'Cluster', { vpc }),
+          taskDefinition: td,
+          launchTarget: new tasks.EcsFargateLaunchTarget(),
+          assignPublicIp: true,
+          subnets: { subnetType: ec2.SubnetType.PUBLIC },
+        });
+        new sfn.StateMachine(stack, 'Sm', { definitionBody: sfn.DefinitionBody.fromChainable(run) });
+      });
+      expect(result.ecs.some((v) => v.includes('runs tasks with a public IP'))).toBe(true);
+      expect(result.ecs.some((v) => v.includes('public subnet'))).toBe(true);
     });
   });
 

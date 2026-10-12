@@ -1,6 +1,6 @@
 // @ts-check
 // ESLint configuration for the CDK project.
-// Rules follow .kiro/steering/AGENTS.md: strict typing (no `any`), cyclomatic
+// Project coding rules: strict typing (no `any`, prefer `unknown`), cyclomatic
 // complexity <= 12, ordered imports, and JSDoc on functions and classes.
 import eslint from '@eslint/js';
 import importX from 'eslint-plugin-import-x';
