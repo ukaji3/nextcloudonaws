@@ -16,7 +16,6 @@ ENV NEXTCLOUD_VERSION=34.0.4
 COPY --chmod=775 containers/nextcloud/*.sh /
 COPY --chmod=774 containers/nextcloud/upgrade.exclude /upgrade.exclude
 COPY containers/nextcloud/config/*.php /
-COPY containers/nextcloud/diag.php /usr/src/nextcloud/diag.php
 COPY containers/nextcloud/dinit.d/ /etc/dinit.d/
 COPY containers/nextcloud/root.motd /root.motd
 

@@ -619,7 +619,12 @@ fi
 # use SCAN instead of KEYS, was removed: Nextcloud ships a SCAN + UNLINK,
 # cluster-safe clear() since 33.0.7, and overwriting the file with a copy from
 # an older release would downgrade core code.)
-[ -f /usr/src/nextcloud/diag.php ] && cp /usr/src/nextcloud/diag.php /var/www/html/diag.php
+# Remove files earlier versions of this stack installed into the web root
+# (diag.php: unauthenticated Redis probe, reported as EXTRA_FILE by
+# "occ integrity:check-core"). The copy on EFS outlives the image change.
+# shellcheck source=aws-legacy-files.sh
+. /aws-legacy-files.sh
+aws_remove_legacy_webroot_files /var/www/html
 # Remove Redis session handler - ElastiCache Serverless is cluster-mode, PHP session.save_handler=redis is non-cluster
 rm -f /usr/local/etc/php/conf.d/redis-session.ini
 # Ensure redis.config.php exists on EFS (rsync in version_greater block may skip it)
