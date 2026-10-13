@@ -7,6 +7,8 @@
   "context": {
     "domain": "cloud.example.com",
     "certificateArn": "",
+    "hostedZoneId": "",
+    "hostedZoneName": "",
     "aioImageTag": "20260929_105435",
     "nextcloudImageUri": "",
     "apachePort": 11000,

@@ -29,35 +29,46 @@ export interface LoadBalancerResources {
 }
 
 /**
+ * Message raised when no TLS certificate can be resolved. The public ALB is
+ * never created with a plaintext HTTP listener (fail closed).
+ */
+export const TLS_REQUIRED_MESSAGE =
+  'TLS is required: set context "certificateArn" (existing ACM certificate in the stack region), '
+  + 'or both "hostedZoneId" and "hostedZoneName" (a DNS-validated certificate is issued). '
+  + 'The ALB is never created with a plaintext HTTP listener.';
+
+/**
  * Resolve the TLS certificate: an existing ARN, or a DNS-validated certificate
- * when a hosted zone is configured. Without either, the listener is plain HTTP.
+ * when a hosted zone is configured. Without either, synthesis fails.
  *
  * @param scope - Stack the certificate belongs to.
  * @param config - Deployment parameters.
  * @param hostedZone - Hosted zone used for DNS validation.
- * @returns Certificate, or undefined.
+ * @returns Certificate of the HTTPS listener.
+ * @throws {Error} When neither a certificate ARN nor a hosted zone is configured.
  */
 function resolveCertificate(
   scope: Construct,
   config: StackConfig,
   hostedZone?: route53.IHostedZone,
-): acm.ICertificate | undefined {
+): acm.ICertificate {
   if (config.certificateArn) {
     return acm.Certificate.fromCertificateArn(scope, 'Cert', config.certificateArn);
   }
   if (hostedZone) {
     return new acm.Certificate(scope, 'Cert', { domainName: config.domain, validation: acm.CertificateValidation.fromDns(hostedZone) });
   }
-  return undefined;
+  throw new Error(TLS_REQUIRED_MESSAGE);
 }
 
 /**
- * Create the internet-facing ALB, its listener and the Apache target group.
+ * Create the internet-facing ALB, its HTTPS listener and the Apache target group.
  *
  * @param scope - Stack the resources belong to.
  * @param config - Deployment parameters.
  * @param props - Network, logging and target service.
  * @returns ALB and target group.
+ * @throws {Error} When no TLS certificate can be resolved (see {@link TLS_REQUIRED_MESSAGE}).
  */
 export function buildLoadBalancer(scope: Construct, config: StackConfig, props: LoadBalancerProps): LoadBalancerResources {
   const certificate = resolveCertificate(scope, config, props.hostedZone);
@@ -69,10 +80,12 @@ export function buildLoadBalancer(scope: Construct, config: StackConfig, props: 
   });
   alb.logAccessLogs(props.accessLogBucket, 'alb');
 
-  const listenerProps: elbv2.BaseApplicationListenerProps = certificate
-    ? { port: 443, protocol: elbv2.ApplicationProtocol.HTTPS, certificates: [certificate], sslPolicy: elbv2.SslPolicy.RECOMMENDED_TLS }
-    : { port: 80, protocol: elbv2.ApplicationProtocol.HTTP };
-  const listener = alb.addListener('Listener', listenerProps);
+  const listener = alb.addListener('Listener', {
+    port: 443,
+    protocol: elbv2.ApplicationProtocol.HTTPS,
+    certificates: [certificate],
+    sslPolicy: elbv2.SslPolicy.RECOMMENDED_TLS,
+  });
 
   const apacheTargetGroup = listener.addTargets('ApacheTarget', {
     port: config.apachePort,

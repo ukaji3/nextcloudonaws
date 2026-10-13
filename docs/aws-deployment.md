@@ -592,13 +592,15 @@ SSL ポリシー:       ELBSecurityPolicy-TLS13-1-2-2021-06
 
 ### 7.2 独自ドメイン + TLS 設定
 
-`cdk.json` の context パラメータで設定する。Route 53 ホストゾーンを指定すると、ACM 証明書の発行・DNS 検証・Alias レコード作成が全て自動化される。
+`cdk.json` の context パラメータで設定する。TLS は必須で、次のどちらかを指定しないと `cdk synth` / `cdk deploy` はエラーで停止する（平文 HTTP のリスナーは作らない）。Route 53 ホストゾーンを指定すると、ACM 証明書の発行・DNS 検証・Alias レコード作成が全て自動化される。
 
 | 設定パターン | 動作 |
 |---|---|
 | `hostedZoneId` + `hostedZoneName` を指定 | ACM 証明書を自動発行 + DNS 検証 + Alias レコード作成 |
-| `certificateArn` を指定 | 既存証明書を使用 + Alias レコード作成（ゾーン指定時） |
-| どちらも未指定 | HTTP:80 で起動（TLS なし） |
+| `certificateArn` を指定 | 既存証明書（スタックと同じリージョンの ACM）を使用 + Alias レコード作成（ゾーン指定時） |
+| どちらも未指定、またはホストゾーンの指定が片方だけ | synth がエラーで停止する（`TLS is required: ...`） |
+
+ALB のリスナーは HTTPS:443 のみで、HTTP:80 は待ち受けない（HTTP から HTTPS へのリダイレクトも無い）。
 
 ```json
 {
@@ -905,8 +907,8 @@ npm install
 | パラメータ | 説明 |
 |---|---|
 | `domain` | Nextcloud のドメイン名 |
-| `certificateArn` | ACM 証明書の ARN（空の場合、`hostedZoneId` 指定時は自動発行） |
-| `hostedZoneId` | Route 53 ホストゾーン ID（指定時は DNS レコード自動作成） |
+| `certificateArn` | 既存 ACM 証明書の ARN。空の場合は `hostedZoneId` + `hostedZoneName` から自動発行する。どちらも無い場合は synth がエラーになる（TLS 必須） |
+| `hostedZoneId` | Route 53 ホストゾーン ID（指定時は証明書の自動発行と DNS レコード作成。`hostedZoneName` と対で指定） |
 | `hostedZoneName` | Route 53 ホストゾーン名（例: `example.com`） |
 | `aioImageTag` | AIO イメージ（apache / onlyoffice / imaginary / talk）のタグ |
 | `aioNotifyPushImageTag` | notify-push イメージのタグ（省略時は `aioImageTag` と同じ）。notify-push だけ別の版に固定したい場合に使う |

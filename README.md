@@ -19,7 +19,7 @@ Nextcloud を AWS ECS Fargate 上にデプロイするためのプロジェク�
 
 ## 主な機能
 
-- **自動 TLS**: Route 53 ホストゾーン指定で ACM 証明書発行・DNS レコード作成を自動化
+- **TLS 必須・自動 TLS**: ALB は HTTPS:443 のみ（証明書もホストゾーンも無い場合は synth がエラーになる）。Route 53 ホストゾーン指定で ACM 証明書発行・DNS レコード作成を自動化
 - **コスト最適化**: S3 Intelligent-Tiering、OpenSearch Service プロビジョンド
 - **運用監視**: CloudWatch Alarms (11件、SNS で ALARM/OK を通知)、Dashboard、ログメトリクスフィルター、Aurora Performance Insights
 - **データ保護**: AWS Backup（EFS + Aurora、日次 35 日 / 週次 90 日）、Aurora PITR 7 日、S3 バージョニング
@@ -64,8 +64,8 @@ npx cdk deploy
 | パラメータ | 説明 |
 |---|---|
 | `domain` | Nextcloud のドメイン名 |
-| `hostedZoneId` / `hostedZoneName` | Route 53 ホストゾーン（指定時は証明書・DNS 自動設定） |
-| `certificateArn` | 既存 ACM 証明書の ARN（ホストゾーン未指定時に使用） |
+| `hostedZoneId` / `hostedZoneName` | Route 53 ホストゾーン（指定時は証明書・DNS 自動設定。2つ対で指定） |
+| `certificateArn` | 既存 ACM 証明書の ARN（ホストゾーン未指定時に使用）。ホストゾーンか証明書のどちらかが必須で、無い場合は synth がエラーになる（平文 HTTP では起動しない） |
 | `enableOnlyOffice` | OnlyOffice の有効化 |
 | `enableFulltextsearch` | OpenSearch Service + 全文検索の有効化 |
 | `auroraMinAcu` / `auroraMaxAcu` | Aurora Serverless v2 の ACU 範囲 |

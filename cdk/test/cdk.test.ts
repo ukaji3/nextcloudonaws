@@ -6,6 +6,7 @@ import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 
 import { NextcloudAioStack } from '../lib/cdk-stack';
+import { TLS_REQUIRED_MESSAGE } from '../lib/stack/load-balancer';
 import {
   CfnResources,
   ec2PublicPlacementViolations,
@@ -44,6 +45,59 @@ function synthTemplate(): Template {
 
 describe('NextcloudAioStack', () => {
   const template = synthTemplate();
+
+  describe('TLS required on the public ALB (fail closed)', () => {
+    /**
+     * Synthesize the stack with context overrides.
+     *
+     * @param overrides - Context values replacing the test defaults.
+     * @returns Template of the synthesized stack.
+     */
+    function synthWith(overrides: Record<string, string>): Template {
+      const app = new cdk.App({ context: { ...testContext, ...overrides } });
+      const stack = new NextcloudAioStack(app, 'TlsStack', { env: { account: '111122223333', region: 'us-east-1' } });
+      return Template.fromStack(stack);
+    }
+
+    /**
+     * Port and protocol of every ALB/NLB listener in a template.
+     *
+     * @param t - Template to inspect.
+     * @returns Entries such as "443/HTTPS".
+     */
+    function listeners(t: Template): string[] {
+      return Object.values(t.findResources('AWS::ElasticLoadBalancingV2::Listener'))
+        .map((l) => (l as { Properties: { Port: number; Protocol: string } }).Properties)
+        .map((p) => `${String(p.Port)}/${p.Protocol}`);
+    }
+
+    test('証明書もホストゾーンも無い場合は synth を失敗させる（平文 HTTP では作らない）', () => {
+      expect(() => synthWith({ certificateArn: '', hostedZoneId: '', hostedZoneName: '' }))
+        .toThrow(TLS_REQUIRED_MESSAGE);
+    });
+
+    test('ホストゾーンの指定が片方だけの場合も synth を失敗させる', () => {
+      expect(() => synthWith({ certificateArn: '', hostedZoneName: '' })).toThrow(TLS_REQUIRED_MESSAGE);
+      expect(() => synthWith({ certificateArn: '', hostedZoneId: '' })).toThrow(TLS_REQUIRED_MESSAGE);
+    });
+
+    test('ホストゾーン指定時: ALB は HTTPS:443 のみ（DNS 検証の証明書を発行）', () => {
+      const albListeners = listeners(template).filter((l) => l.endsWith('/HTTPS') || l.endsWith('/HTTP'));
+      expect(albListeners).toEqual(['443/HTTPS']);
+      template.resourceCountIs('AWS::CertificateManager::Certificate', 1);
+    });
+
+    test('既存証明書の ARN 指定時: ALB は HTTPS:443 のみ（証明書は新規発行しない）', () => {
+      const t = synthWith({ certificateArn: 'arn:aws:acm:us-east-1:111122223333:certificate/x', hostedZoneId: '', hostedZoneName: '' });
+      const albListeners = listeners(t).filter((l) => l.endsWith('/HTTPS') || l.endsWith('/HTTP'));
+      expect(albListeners).toEqual(['443/HTTPS']);
+      t.resourceCountIs('AWS::CertificateManager::Certificate', 0);
+      t.hasResourceProperties('AWS::ElasticLoadBalancingV2::Listener', {
+        Port: 443,
+        Certificates: [{ CertificateArn: 'arn:aws:acm:us-east-1:111122223333:certificate/x' }],
+      });
+    });
+  });
 
   describe('Upgrade State Machine', () => {
     test('nextcloud-upgrade ステートマシンが存在する', () => {
