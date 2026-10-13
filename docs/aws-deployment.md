@@ -784,7 +784,7 @@ HTTPS:                 強制
 | `containers/nextcloud/entrypoint.sh` | 修正 | 下記の変更を含む |
 | `containers/nextcloud/aws-custom-apps-repair.sh` | 追加 | custom_apps 入れ子ディレクトリの修復ライブラリ（10.2 参照） |
 | `containers/nextcloud/tests/test-aws-custom-apps-repair.sh` | 追加 | 上記ライブラリのテスト（`bash containers/nextcloud/tests/test-aws-custom-apps-repair.sh`） |
-| `containers/nextcloud/Dockerfile` | 修正 | aws-cli 追加、`clear_env = no`、diag.php の COPY（upstream AIO main に同期済み。PHP 8.4 / dinit / su-exec） |
+| `containers/nextcloud/Dockerfile` | 修正 | aws-cli 追加、`clear_env = no`（upstream AIO main に同期済み。PHP 8.4 / dinit / su-exec） |
 | `containers/nextcloud/aws-healthcheck.sh` | 追加 | ECS 用ヘルスチェック（15 章参照、テスト: `tests/test-aws-healthcheck.sh`） |
 
 ### 10.1 entrypoint.sh の変更内容

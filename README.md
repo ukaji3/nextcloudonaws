@@ -38,14 +38,14 @@ docs/                    デプロイメントガイド
 
 | ファイル | 変更内容 |
 |---|---|
-| `containers/nextcloud/Dockerfile` | `app/` 依存除去、COPY パス変更、AIO_TOKEN/AIO_URL 削除、aws-cli 追加（アップグレード SFN の config.php バックアップ用）、`AIO_LOG_LEVEL` デフォルト定義、diag.php の COPY、`clear_env = no` |
+| `containers/nextcloud/Dockerfile` | `app/` 依存除去、COPY パス変更、AIO_TOKEN/AIO_URL 削除、aws-cli 追加（アップグレード SFN の config.php バックアップ用）、`AIO_LOG_LEVEL` デフォルト定義、`clear_env = no` |
 | `containers/nextcloud/config/redis.config.php` | ElastiCache Serverless 用に全面書き換え（`REDIS_TLS_ENABLED` による TLS 接続、クラスタモード設定） |
-| `containers/nextcloud/entrypoint.sh` | rsync に `--inplace` 付与（EFS 対応）、custom_apps 入れ子ディレクトリの自己修復（`aws_repair_custom_apps_and_upgrade` を3箇所で実行）、OpenSearch 互換パッチ（ProductCheckTrait / EndpointTrait 呼び出し無効化 / highlight `max_analyzer_offset`）、`fulltextsearch_elasticsearch:configure` の出力抑止（資格情報をログに出さない）、末尾に AWS 固有ブロック（diag.php 配置・redis セッションハンドラ除去・redis.config.php 保全・PHP-FPM 追加設定） |
+| `containers/nextcloud/entrypoint.sh` | rsync に `--inplace` 付与（EFS 対応）、custom_apps 入れ子ディレクトリの自己修復（`aws_repair_custom_apps_and_upgrade` を3箇所で実行）、OpenSearch 互換パッチ（ProductCheckTrait / EndpointTrait 呼び出し無効化 / highlight `max_analyzer_offset`）、`fulltextsearch_elasticsearch:configure` の出力抑止（資格情報をログに出さない）、末尾に AWS 固有ブロック（旧版が置いた独自ファイルの除去・redis セッションハンドラ除去・redis.config.php 保全・PHP-FPM 追加設定） |
 | `containers/nextcloud/aws-custom-apps-repair.sh` | 独自追加。EFS 上でアプリ更新後に生じる入れ子ディレクトリの修復ライブラリ（テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/aws-healthcheck.sh` | 独自追加。ECS 用ヘルスチェック（php-fpm の待受で正常、インストール・アップグレード中は保護。テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/aws-trusted-proxies.sh` | 独自追加。NAT Gateway の EIP（`AWS_TRUSTED_PROXIES`）を `trusted_proxies` 20〜29 番に設定（notify_push 用。テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/aws-talk-servers.sh` | 独自追加。以前の版が登録した誤った TURN/STUN（`<domain>:3478`）を、正しい `turn.<domain>:3478` の登録後に削除（テスト: `containers/nextcloud/tests/`） |
-| `containers/nextcloud/diag.php` | 独自追加（Redis 接続診断。外部からは 404） |
+| `containers/nextcloud/aws-legacy-files.sh` | 独自追加。旧版が Web ルートに置いた独自ファイル（`diag.php`）を起動時に除去（テスト: `containers/nextcloud/tests/`） |
 
 同期状況: Nextcloud 34.0.4 / PHP 8.4.26 / dinit。upstream AIO main `da7cf9d7`（2026-10-08）に同期済みで、上表以外のファイル（start.sh・notify*.sh・dinit.d/・config/ の大半など）は upstream と同一。以前の redis-patch.php（Redis.php の全置換）は、Nextcloud 33.0.7 以降の公式実装が SCAN + UNLINK に変わったため撤去した。
 
