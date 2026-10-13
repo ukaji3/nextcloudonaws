@@ -1,11 +1,13 @@
 import * as cdk from 'aws-cdk-lib';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as servicediscovery from 'aws-cdk-lib/aws-servicediscovery';
 import { Construct } from 'constructs';
 import { DataBackup } from './constructs/data-backup';
+import { ExecSessionAudit } from './constructs/exec-session-audit';
 import { GeoRestrictedWebAcl } from './constructs/geo-restricted-web-acl';
 import { ImageScanning } from './constructs/image-scanning';
 import { loadStackConfig, StackConfig } from './stack/config';
@@ -92,7 +94,15 @@ export class NextcloudAioStack extends cdk.Stack {
     });
     const osDomain = buildSearchDomain(this, { vpc: network.vpc, ecsSg: network.ecsSg, osSecret: featureSecrets.osSecret });
 
-    const cluster = new ecs.Cluster(this, 'Cluster', { vpc: network.vpc, containerInsights: true });
+    // ECS Exec gives an interactive root shell inside a task, so the sessions
+    // are recorded in a dedicated, encrypted log group instead of the default
+    // awslogs group of the task definition.
+    const execAudit = new ExecSessionAudit(this, 'ExecAudit', { retention: logs.RetentionDays.ONE_YEAR });
+    const cluster = new ecs.Cluster(this, 'Cluster', {
+      vpc: network.vpc,
+      containerInsights: true,
+      executeCommandConfiguration: execAudit.clusterConfiguration(),
+    });
     const namespace = new servicediscovery.PrivateDnsNamespace(this, 'Namespace', { name: 'nextcloud.local', vpc: network.vpc });
     const ctx: ServiceContext = { scope: this, cluster, namespace, ecsSg: network.ecsSg };
 
@@ -127,7 +137,7 @@ export class NextcloudAioStack extends cdk.Stack {
 
     const notifyTd = buildNotifyPushTask(this, config, common, files);
     const notifySvc = createFargateService(ctx, 'notify-push', notifyTd, {
-      desiredCount: SERVICE_BASELINE.notifyPush, managedDesiredCount: true,
+      desiredCount: SERVICE_BASELINE.notifyPush, managedDesiredCount: true, enableExecuteCommand: false,
     });
     notifySvc.node.addDependency(nextcloudSvc);
 

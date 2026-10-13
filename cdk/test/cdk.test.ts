@@ -406,6 +406,66 @@ describe('NextcloudAioStack', () => {
     });
   });
 
+  describe('ECS Exec (audit trail and scope)', () => {
+    /**
+     * EnableExecuteCommand per service, keyed by the short service name.
+     *
+     * @returns Map of service name to flag.
+     */
+    function execPerService(): Record<string, boolean | undefined> {
+      const out: Record<string, boolean | undefined> = {};
+      for (const [id, svc] of Object.entries(template.findResources('AWS::ECS::Service'))) {
+        const name = id.replace(/Service[0-9A-F]+$/, '');
+        out[name] = (svc as { Properties: { EnableExecuteCommand?: boolean } }).Properties.EnableExecuteCommand;
+      }
+      return out;
+    }
+
+    test('セッションは専用ロググループに記録し、CMK で暗号化する', () => {
+      const clusters = Object.values(template.findResources('AWS::ECS::Cluster'));
+      expect(clusters).toHaveLength(1);
+      const config = (clusters[0] as { Properties: { Configuration?: { ExecuteCommandConfiguration?: Record<string, unknown> } } })
+        .Properties.Configuration?.ExecuteCommandConfiguration;
+      expect(config?.Logging).toBe('OVERRIDE');
+      const logConfig = config?.LogConfiguration as { CloudWatchEncryptionEnabled?: boolean } | undefined;
+      expect(logConfig?.CloudWatchEncryptionEnabled).toBe(true);
+      expect(config?.KmsKeyId).toBeDefined();
+      // The log group is a separate one, not the application log group.
+      const appLogGroup = Object.entries(template.findResources('AWS::Logs::LogGroup'))
+        .find(([id]) => id.startsWith('EcsLogs'));
+      const serialized = JSON.stringify(config);
+      expect(appLogGroup?.[0]).toBeDefined();
+      expect(serialized).not.toContain(String(appLogGroup?.[0]));
+      expect(serialized).toContain('ExecAuditLogs');
+      expect(serialized).toContain('ExecAuditKey');
+      template.hasResourceProperties('AWS::KMS::Key', Match.objectLike({ EnableKeyRotation: true }));
+      template.hasResourceProperties('AWS::Logs::LogGroup', Match.objectLike({
+        KmsKeyId: Match.anyValue(),
+        RetentionInDays: 365,
+      }));
+    });
+
+    test('Exec を使うサービスだけで有効にする', () => {
+      expect(execPerService()).toEqual({
+        nextcloud: true,
+        apache: true,
+        Talk: true,
+        notifypush: false,
+        onlyoffice: false,
+        imaginary: false,
+      });
+    });
+
+    test('タスクロールは Exec ログ用の権限だけを持つ（鍵は専用 CMK、ログは専用グループ）', () => {
+      const policies = Object.values(template.findResources('AWS::IAM::Policy'))
+        .filter((p) => JSON.stringify((p as { Properties: { Roles: unknown } }).Properties.Roles).includes('TaskRole'));
+      const serialized = JSON.stringify(policies);
+      expect(serialized).toContain('kms:Decrypt');
+      expect(serialized).toContain('ExecAuditKey');
+      expect(serialized).toContain('logs:PutLogEvents');
+    });
+  });
+
   describe('Network placement (EC2 rule / ECS design)', () => {
     const resources = template.toJSON().Resources as CfnResources;
 

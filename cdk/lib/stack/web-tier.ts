@@ -212,7 +212,7 @@ export function buildOnlyOfficeService(
     },
   });
   container.addMountPoints({ sourceVolume: 'onlyoffice-data', containerPath: '/var/lib/onlyoffice', readOnly: false });
-  createFargateService(ctx, 'onlyoffice', td);
+  createFargateService(ctx, 'onlyoffice', td, { enableExecuteCommand: false });
   NagSuppressions.addResourceSuppressions(td, [
     { id: 'AwsSolutions-ECS2', reason: 'Non-sensitive configuration values (feature flags) passed as environment variables' },
   ]);
@@ -245,7 +245,7 @@ export function buildImaginaryService(
     environment: { TZ: 'Asia/Tokyo' },
     secrets: { IMAGINARY_SECRET: ecs.Secret.fromSecretsManager(imaginarySecret) },
   });
-  createFargateService(ctx, 'imaginary', td);
+  createFargateService(ctx, 'imaginary', td, { enableExecuteCommand: false });
   return td;
 }
 

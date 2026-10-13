@@ -23,7 +23,7 @@ Nextcloud を AWS ECS Fargate 上にデプロイするためのプロジェク�
 - **コスト最適化**: S3 Intelligent-Tiering、OpenSearch Service プロビジョンド
 - **運用監視**: CloudWatch Alarms (11件、SNS で ALARM/OK を通知)、Dashboard、ログメトリクスフィルター、Aurora Performance Insights
 - **データ保護**: AWS Backup（EFS + Aurora、日次 35 日 / 週次 90 日）、Aurora PITR 7 日、S3 バージョニング
-- **セキュリティ**: AWS WAF は原則遮断で、許可した国（既定 `JP`）と許可 CIDR だけが ALB に到達できる。CDK Nag (AwsSolutions) 準拠、VPC Flow Log、ALB/S3 アクセスログ、ECR プッシュ時脆弱性スキャン
+- **セキュリティ**: AWS WAF は原則遮断で、許可した国（既定 `JP`）と許可 CIDR だけが ALB に到達できる。ECS Exec は必要なサービスだけで有効にし、セッションは専用の暗号化ロググループに記録する。CDK Nag (AwsSolutions) 準拠、VPC Flow Log、ALB/S3 アクセスログ、ECR プッシュ時脆弱性スキャン
 - **アップグレード自動化**: Step Functions によるローリングアップグレード（手動起動。CodePipeline による CI/CD は未実装）
 
 ## ディレクトリ構成

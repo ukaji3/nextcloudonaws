@@ -37,6 +37,16 @@ export interface ServiceOptions {
    * task of the previous revision as well (observed on 2026-10-11).
    */
   readonly managedDesiredCount?: boolean;
+  /**
+   * Allow interactive shells into the tasks of this service via ECS Exec
+   * (default true).
+   *
+   * ECS Exec runs commands as root inside the container and the injected
+   * secrets are visible in that shell, so it is turned off for services that
+   * are never debugged this way. Changing the flag replaces the running tasks,
+   * because ECS cannot turn Exec on or off for an existing task.
+   */
+  readonly enableExecuteCommand?: boolean;
 }
 
 /**
@@ -77,7 +87,7 @@ export function createFargateService(
       dnsRecordType: servicediscovery.DnsRecordType.A,
       dnsTtl: cdk.Duration.seconds(10),
     },
-    enableExecuteCommand: true,
+    enableExecuteCommand: opts?.enableExecuteCommand ?? true,
     circuitBreaker: { enable: true, rollback: true },
   });
 

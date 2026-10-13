@@ -1201,9 +1201,16 @@ ECR のレジストリスキャン（BASIC、プッシュ時）を `ecrScanRepos
 | Step Functions | X-Ray トレース有効 |
 | ECS Container Insights | CPU / メモリ / ネットワーク / ストレージメトリクス |
 
-### 14.7 デバッグ
+### 14.7 デバッグ（ECS Exec）
 
-全 ECS Service で `enableExecuteCommand: true` が設定されている。稼働中のタスクに接続可能:
+ECS Exec はコンテナ内で root のシェルを開き、注入したシークレットも参照できるため、実際に使うサービスだけで有効にする。
+
+| サービス | `enableExecuteCommand` | 理由 |
+|---|---|---|
+| nextcloud / apache / talk | `true` | occ の実行・設定確認・TURN の調査に使う |
+| notify-push / onlyoffice / imaginary | `false` | 運用上シェルに入る必要がない（2026-10-14 時点で過去 90 日の利用実績 0 件） |
+
+セッションの記録は専用のロググループ（`ExecAudit`、カスタマーマネージド KMS キーで暗号化、1 年保持）に出力する。クラスタ設定を省略した場合の既定（`DEFAULT`）はタスク定義の awslogs、つまりアプリケーションログと同じロググループに混在するため、`OVERRIDE` で分離している。
 
 ```bash
 aws ecs execute-command \
@@ -1213,6 +1220,9 @@ aws ecs execute-command \
   --interactive \
   --command "/bin/bash"
 ```
+
+- 実行する IAM プリンシパルには `ecs:ExecuteCommand` と、セッション暗号化のための `kms:GenerateDataKey`（上記の KMS キー）が必要
+- `enableExecuteCommand` の変更はタスクの入れ替えを伴う（ECS は稼働中タスクの Exec 設定を変更できない）
 
 ---
 
