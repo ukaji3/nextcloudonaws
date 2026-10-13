@@ -618,19 +618,32 @@ ALB のリスナーは HTTPS:443 のみで、HTTP:80 は待ち受けない（HTT
 aws route53 list-hosted-zones --query 'HostedZones[?Name==`example.com.`].Id' --output text
 ```
 
-### 7.3 AWS WAF（国別アクセス制限）
+### 7.3 AWS WAF（アクセス制限）
 
-ALB に AWS WAF（リージョナル）の Web ACL を関連付け、`wafAllowedCountries`（既定 `JP`）以外の国からのリクエストを遮断する。
+ALB に AWS WAF（リージョナル）の Web ACL を関連付ける。既定動作は**遮断**で、許可ルールに一致したリクエストだけが通る。
 
-| 優先度 | ルール | 動作 |
-|---|---|---|
-| 0 | `AllowVpcEgress` | NAT Gateway の EIP からのリクエストを常に許可（notify_push・OnlyOffice・Nextcloud 自身が VPC 内から公開 URL を呼ぶため） |
-| 1 | `BlockOutsideAllowedCountries` | 接続元 IP の国が許可国以外なら遮断（403） |
-| 既定 | — | 許可 |
+| 優先度 | ルール | 動作 | 作成条件 |
+|---|---|---|---|
+| 0 | `AllowVpcEgress` | NAT Gateway の EIP からのリクエストを許可（notify_push・OnlyOffice・Nextcloud 自身が VPC 内から公開 URL を呼ぶため） | 常に |
+| 1 | `AllowListedIpv4` | `wafAllowedIpv4Cidrs` の CIDR を国に依らず許可 | `wafAllowedIpv4Cidrs` が空でない場合 |
+| 2 | `AllowListedIpv6` | `wafAllowedIpv6Cidrs` の CIDR を国に依らず許可 | `wafAllowedIpv6Cidrs` が空でない場合 |
+| 3 | `AllowedCountries` | 接続元 IP の国が `wafAllowedCountries`（既定 `JP`）なら許可 | 常に |
+| 既定 | — | 遮断（403） | — |
 
-- 国の判定には接続元 IP を使う（ALB が入口なので X-Forwarded-For は使わない）
+```json
+{
+  "context": {
+    "wafAllowedCountries": "JP",
+    "wafAllowedIpv4Cidrs": "203.0.113.4/32, 198.51.100.0/24",
+    "wafAllowedIpv6Cidrs": "2001:db8:1234::/48"
+  }
+}
+```
+
+- 国の判定には接続元 IP を使う（ALB が入口なので X-Forwarded-For は使わない）。判定は MaxMind の GeoIP データベースによるため、VPN やプロキシの所在国で決まる
+- 許可国以外から使うユーザーは、その拠点の固定 IP を `wafAllowedIpv4Cidrs` / `wafAllowedIpv6Cidrs` に登録する。IP が変わる環境では登録できないため、許可国を増やすか別の経路を用意する
+- ALB のセキュリティグループは 0.0.0.0/0:443 を許可し、到達できるクライアントの制御は WAF で行う（リスナーは `open: false` で作り、暗黙の許可ルールを作らせない）
 - ログは遮断したリクエストだけを CloudWatch Logs `aws-waf-logs-<スタック名>`（30 日保持）に記録する。`authorization` / `cookie` / `requesttoken` ヘッダは伏せる
-- 海外渡航中のユーザーや海外の VPN 経由のアクセスも遮断される
 - WAF は ALB だけに効く。Talk の TURN（NLB、3478）は対象外
 
 ### 7.4 Talk 用 NLB (オプション)

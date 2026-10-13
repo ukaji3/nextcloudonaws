@@ -143,6 +143,8 @@ export class NextcloudAioStack extends cdk.Stack {
       loadBalancer: alb,
       allowedCountries: config.wafAllowedCountries,
       alwaysAllowedIpv4: network.natPublicIps,
+      allowedIpv4Cidrs: config.wafAllowedIpv4Cidrs,
+      allowedIpv6Cidrs: config.wafAllowedIpv6Cidrs,
     });
 
     const { stateMachine, sfnRole } = buildUpgradeStateMachine(this, {

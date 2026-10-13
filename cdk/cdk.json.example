@@ -25,6 +25,8 @@
     "backupWeeklyRetentionDays": 90,
     "ecrScanRepositories": "aio-nextcloud",
     "wafAllowedCountries": "JP",
+    "wafAllowedIpv4Cidrs": "",
+    "wafAllowedIpv6Cidrs": "",
     "githubOwner": "ukaji3",
     "githubRepo": "nextcloudonaws",
     "githubBranch": "main"

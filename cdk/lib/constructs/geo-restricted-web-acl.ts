@@ -18,23 +18,49 @@ export interface GeoRestrictedWebAclProps {
    * Nextcloud itself) call the public URL.
    */
   readonly alwaysAllowedIpv4: readonly string[];
+  /**
+   * IPv4 CIDRs allowed regardless of country, for users outside the allowed
+   * countries. Empty means the rule is not created.
+   */
+  readonly allowedIpv4Cidrs?: readonly string[];
+  /**
+   * IPv6 CIDRs allowed regardless of country, for users outside the allowed
+   * countries. Empty means the rule is not created.
+   */
+  readonly allowedIpv6Cidrs?: readonly string[];
 }
 
 /** Request headers that carry credentials and must not be written to the logs. */
 const REDACTED_HEADERS = ['authorization', 'cookie', 'requesttoken'];
 
+/** Rule priorities. Lower numbers are evaluated first. */
+const PRIORITY = { vpcEgress: 0, ipv4: 1, ipv6: 2, countries: 3 } as const;
+
+/** Address family and the IP set construct id per rule. */
+interface IpRuleSpec {
+  readonly name: string;
+  readonly priority: number;
+  readonly setId: string;
+  readonly version: 'IPV4' | 'IPV6';
+  readonly description: string;
+  readonly addresses: readonly string[];
+}
+
 /**
- * Regional AWS WAF web ACL on the ALB that blocks requests from outside the
- * allowed countries.
+ * Regional AWS WAF web ACL on the ALB. Every request is blocked unless a rule
+ * explicitly allows it (default action: block).
  *
- * Rules (evaluated in order):
- *  1. AllowVpcEgress   - allow the NAT Gateway public IPs
- *  2. BlockOutsideAllowedCountries - block when the source IP is not in an allowed country
- *  default action: allow
+ * Allow rules, in evaluation order:
+ *  0. AllowVpcEgress   - the NAT Gateway public IPs
+ *  1. AllowListedIpv4  - configured IPv4 CIDRs (only when configured)
+ *  2. AllowListedIpv6  - configured IPv6 CIDRs (only when configured)
+ *  3. AllowedCountries - source IP geolocating to an allowed country
  *
- * The client location is taken from the connection source IP (the ALB is the
- * edge, so no forwarded-IP header is trusted). Only blocked requests are
- * logged, with credential headers redacted.
+ * The client location comes from the connection source IP (the ALB is the edge,
+ * so no forwarded-IP header is trusted). AWS WAF resolves it with the MaxMind
+ * GeoIP database, so the country of a VPN or proxy decides the outcome, not the
+ * user's physical location. Only blocked requests are logged, with credential
+ * headers redacted.
  */
 export class GeoRestrictedWebAcl extends Construct {
   /** The web ACL. */
@@ -46,7 +72,7 @@ export class GeoRestrictedWebAcl extends Construct {
   /**
    * @param scope - Parent construct.
    * @param id - Construct id.
-   * @param props - Target, allowed countries and always-allowed IPs.
+   * @param props - Target, allowed countries and allowed IP ranges.
    */
   public constructor(scope: Construct, id: string, props: GeoRestrictedWebAclProps) {
     super(scope, id);
@@ -55,38 +81,12 @@ export class GeoRestrictedWebAcl extends Construct {
     }
     const stackName = cdk.Stack.of(this).stackName;
 
-    const vpcEgress = new wafv2.CfnIPSet(this, 'VpcEgressIps', {
-      scope: 'REGIONAL',
-      ipAddressVersion: 'IPV4',
-      addresses: props.alwaysAllowedIpv4.map((ip) => cdk.Fn.join('', [ip, '/32'])),
-      description: 'NAT Gateway public IPs of the Nextcloud VPC',
-    });
-
     this.webAcl = new wafv2.CfnWebACL(this, 'WebAcl', {
       scope: 'REGIONAL',
-      defaultAction: { allow: {} },
-      description: `Allow only ${props.allowedCountries.join(', ')} to reach the Nextcloud ALB`,
+      defaultAction: { block: {} },
+      description: `Block every request except ${props.allowedCountries.join(', ')} and the configured IP ranges`,
       visibilityConfig: GeoRestrictedWebAcl.visibility(`${stackName}-geo-acl`),
-      rules: [
-        {
-          name: 'AllowVpcEgress',
-          priority: 0,
-          action: { allow: {} },
-          statement: { ipSetReferenceStatement: { arn: vpcEgress.attrArn } },
-          visibilityConfig: GeoRestrictedWebAcl.visibility('AllowVpcEgress'),
-        },
-        {
-          name: 'BlockOutsideAllowedCountries',
-          priority: 1,
-          action: { block: {} },
-          statement: {
-            notStatement: {
-              statement: { geoMatchStatement: { countryCodes: [...props.allowedCountries] } },
-            },
-          },
-          visibilityConfig: GeoRestrictedWebAcl.visibility('BlockOutsideAllowedCountries'),
-        },
-      ],
+      rules: this.buildRules(props),
     });
 
     new wafv2.CfnWebACLAssociation(this, 'AlbAssociation', {
@@ -113,6 +113,78 @@ export class GeoRestrictedWebAcl extends Construct {
         }],
       },
     });
+  }
+
+  /**
+   * Build the allow rules. The optional IP rules are left out when their list
+   * is empty, so an unused rule never reaches the template.
+   *
+   * @param props - Allowed countries and allowed IP ranges.
+   * @returns Rules in evaluation order.
+   */
+  private buildRules(props: GeoRestrictedWebAclProps): wafv2.CfnWebACL.RuleProperty[] {
+    const specs: IpRuleSpec[] = [{
+      name: 'AllowVpcEgress',
+      priority: PRIORITY.vpcEgress,
+      setId: 'VpcEgressIps',
+      version: 'IPV4',
+      description: 'NAT Gateway public IPs of the Nextcloud VPC',
+      // The NAT public IPs are CloudFormation references, so the /32 suffix has
+      // to be appended at deploy time.
+      addresses: props.alwaysAllowedIpv4.map((ip) => cdk.Fn.join('', [ip, '/32'])),
+    }];
+    if (props.allowedIpv4Cidrs?.length) {
+      specs.push({
+        name: 'AllowListedIpv4',
+        priority: PRIORITY.ipv4,
+        setId: 'AllowedIpv4',
+        version: 'IPV4',
+        description: 'IPv4 CIDRs allowed regardless of country',
+        addresses: props.allowedIpv4Cidrs,
+      });
+    }
+    if (props.allowedIpv6Cidrs?.length) {
+      specs.push({
+        name: 'AllowListedIpv6',
+        priority: PRIORITY.ipv6,
+        setId: 'AllowedIpv6',
+        version: 'IPV6',
+        description: 'IPv6 CIDRs allowed regardless of country',
+        addresses: props.allowedIpv6Cidrs,
+      });
+    }
+    return [
+      ...specs.map((spec) => this.ipSetRule(spec)),
+      {
+        name: 'AllowedCountries',
+        priority: PRIORITY.countries,
+        action: { allow: {} },
+        statement: { geoMatchStatement: { countryCodes: [...props.allowedCountries] } },
+        visibilityConfig: GeoRestrictedWebAcl.visibility('AllowedCountries'),
+      },
+    ];
+  }
+
+  /**
+   * Create an IP set and the rule allowing its addresses.
+   *
+   * @param spec - Rule name, priority, IP set id, address family, description and addresses.
+   * @returns Allow rule referencing the new IP set.
+   */
+  private ipSetRule(spec: IpRuleSpec): wafv2.CfnWebACL.RuleProperty {
+    const ipSet = new wafv2.CfnIPSet(this, spec.setId, {
+      scope: 'REGIONAL',
+      ipAddressVersion: spec.version,
+      addresses: [...spec.addresses],
+      description: spec.description,
+    });
+    return {
+      name: spec.name,
+      priority: spec.priority,
+      action: { allow: {} },
+      statement: { ipSetReferenceStatement: { arn: ipSet.attrArn } },
+      visibilityConfig: GeoRestrictedWebAcl.visibility(spec.name),
+    };
   }
 
   /**

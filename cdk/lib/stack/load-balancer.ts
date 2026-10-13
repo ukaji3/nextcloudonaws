@@ -85,6 +85,9 @@ export function buildLoadBalancer(scope: Construct, config: StackConfig, props: 
     protocol: elbv2.ApplicationProtocol.HTTPS,
     certificates: [certificate],
     sslPolicy: elbv2.SslPolicy.RECOMMENDED_TLS,
+    // Do not let CDK add its own 0.0.0.0/0 ingress rule: the ALB ingress is
+    // declared explicitly in buildNetwork, and access is controlled by the WAF.
+    open: false,
   });
 
   const apacheTargetGroup = listener.addTargets('ApacheTarget', {

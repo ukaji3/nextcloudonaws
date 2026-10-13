@@ -68,7 +68,16 @@ export function buildNetwork(scope: Construct, apachePort: number): NetworkResou
   const vpc = buildVpc(scope);
 
   const albSg = new ec2.SecurityGroup(scope, 'AlbSg', { vpc, description: 'ALB' });
-  albSg.addIngressRule(ec2.Peer.ipv4('153.242.166.137/32'), ec2.Port.tcp(443));
+  // The ALB accepts HTTPS from the internet on purpose; which clients may
+  // actually reach Nextcloud is decided by the WAF web ACL (allowed countries
+  // and allowed IP ranges), not by this security group. The rule is declared
+  // here, and the listener is created with open: false, so that the only ALB
+  // ingress is this one instead of a rule the listener adds implicitly.
+  albSg.addIngressRule(
+    ec2.Peer.anyIpv4(),
+    ec2.Port.tcp(443),
+    'HTTPS from the internet; which clients are allowed is enforced by the WAF web ACL',
+  );
 
   const ecsSg = new ec2.SecurityGroup(scope, 'EcsSg', { vpc, description: 'ECS Tasks' });
   ecsSg.addIngressRule(albSg, ec2.Port.tcp(apachePort));

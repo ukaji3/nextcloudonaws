@@ -33,6 +33,8 @@ export interface StackConfig {
   readonly ecrScanRepositories: readonly string[];
   /** Countries (ISO 3166 alpha-2) allowed through the ALB web ACL. */
   readonly wafAllowedCountries: readonly string[];
+  readonly wafAllowedIpv4Cidrs: readonly string[];
+  readonly wafAllowedIpv6Cidrs: readonly string[];
 }
 
 /**
@@ -152,5 +154,7 @@ export function loadStackConfig(scope: Construct): StackConfig {
     backupWeeklyRetentionDays: contextNumber(scope, 'backupWeeklyRetentionDays', 90),
     ecrScanRepositories: contextList(scope, 'ecrScanRepositories', 'aio-nextcloud'),
     wafAllowedCountries: contextList(scope, 'wafAllowedCountries', 'JP'),
+    wafAllowedIpv4Cidrs: contextList(scope, 'wafAllowedIpv4Cidrs', ''),
+    wafAllowedIpv6Cidrs: contextList(scope, 'wafAllowedIpv6Cidrs', ''),
   };
 }

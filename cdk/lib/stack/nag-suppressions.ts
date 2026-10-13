@@ -33,7 +33,7 @@ export interface NagTargets {
  */
 function suppressPlatform(t: NagTargets): void {
   NagSuppressions.addResourceSuppressions(t.albSg, [
-    { id: 'AwsSolutions-EC23', reason: 'ALB is public-facing for Nextcloud web access' },
+    { id: 'AwsSolutions-EC23', reason: 'The ALB must accept HTTPS from the internet; which clients may reach Nextcloud is enforced by the WAF web ACL (default action block, allow rules for the configured countries and IP ranges)' },
   ]);
   NagSuppressions.addResourceSuppressions(t.executionRole, [
     { id: 'AwsSolutions-IAM4', appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'], reason: 'Standard ECS task execution role managed policy' },

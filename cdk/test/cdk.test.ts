@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
+import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 
@@ -204,26 +205,55 @@ describe('NextcloudAioStack', () => {
     });
   });
 
-  describe('WAF (geo restriction)', () => {
-    test('日本以外を遮断し、NAT Gateway の IP は常に許可する', () => {
-      const acls = Object.values(template.findResources('AWS::WAFv2::WebACL'));
+  describe('WAF (deny by default, explicit allow list)', () => {
+    /** Properties of the single web ACL in a template. */
+    interface WebAclProps {
+      readonly Scope: string;
+      readonly DefaultAction: unknown;
+      readonly Rules: Record<string, unknown>[];
+    }
+
+    /**
+     * Read the single web ACL of a template.
+     *
+     * @param t - Template to inspect.
+     * @returns Web ACL properties.
+     */
+    function webAcl(t: Template): WebAclProps {
+      const acls = Object.values(t.findResources('AWS::WAFv2::WebACL'));
       expect(acls).toHaveLength(1);
-      const props = (acls[0] as { Properties: { Scope: string; DefaultAction: unknown; Rules: Record<string, unknown>[] } }).Properties;
+      return (acls[0] as { Properties: WebAclProps }).Properties;
+    }
+
+    /**
+     * Synthesize the stack with context overrides.
+     *
+     * @param id - Stack id (must be unique per test).
+     * @param overrides - Context values replacing the test defaults.
+     * @returns Template of the synthesized stack.
+     */
+    function synthWith(id: string, overrides: Record<string, string>): Template {
+      const app = new cdk.App({ context: { ...testContext, ...overrides } });
+      return Template.fromStack(new NextcloudAioStack(app, id, { env: { account: '111122223333', region: 'us-east-1' } }));
+    }
+
+    test('既定動作は遮断で、許可ルールだけが通す', () => {
+      const props = webAcl(template);
       expect(props.Scope).toBe('REGIONAL');
-      expect(props.DefaultAction).toEqual({ Allow: {} });
-      const [first, second] = props.Rules;
-      expect(first.Name).toBe('AllowVpcEgress');
-      expect(first.Action).toEqual({ Allow: {} });
-      expect(second.Name).toBe('BlockOutsideAllowedCountries');
-      expect(second.Action).toEqual({ Block: {} });
-      expect(second.Statement).toEqual({
-        NotStatement: { Statement: { GeoMatchStatement: { CountryCodes: ['JP'] } } },
-      });
+      expect(props.DefaultAction).toEqual({ Block: {} });
+      expect(props.Rules.every((r) => JSON.stringify(r.Action) === JSON.stringify({ Allow: {} }))).toBe(true);
+    });
+
+    test('CIDR 未設定時のルールは NAT 許可と許可国のみ', () => {
+      const props = webAcl(template);
+      expect(props.Rules.map((r) => [r.Priority, r.Name])).toEqual([[0, 'AllowVpcEgress'], [3, 'AllowedCountries']]);
+      expect(props.Rules[1].Statement).toEqual({ GeoMatchStatement: { CountryCodes: ['JP'] } });
     });
 
     test('IP セットは全 NAT Gateway の EIP/32', () => {
       const eipIds = Object.keys(template.findResources('AWS::EC2::EIP'));
       template.hasResourceProperties('AWS::WAFv2::IPSet', {
+        IPAddressVersion: 'IPV4',
         Addresses: eipIds.map((id) => ({ 'Fn::Join': ['', [{ 'Fn::GetAtt': [id, 'PublicIp'] }, '/32']] })),
       });
     });
@@ -251,13 +281,68 @@ describe('NextcloudAioStack', () => {
     });
 
     test('wafAllowedCountries で許可国を変更できる', () => {
-      const app = new cdk.App({ context: { ...testContext, wafAllowedCountries: 'JP, US' } });
-      const stack = new NextcloudAioStack(app, 'CountryStack', { env: { account: '111122223333', region: 'us-east-1' } });
-      Template.fromStack(stack).hasResourceProperties('AWS::WAFv2::WebACL', Match.objectLike({
-        Rules: Match.arrayWith([Match.objectLike({
-          Statement: { NotStatement: { Statement: { GeoMatchStatement: { CountryCodes: ['JP', 'US'] } } } },
-        })]),
-      }));
+      const props = webAcl(synthWith('CountryStack', { wafAllowedCountries: 'JP, US' }));
+      expect(props.Rules.find((r) => r.Name === 'AllowedCountries')?.Statement)
+        .toEqual({ GeoMatchStatement: { CountryCodes: ['JP', 'US'] } });
+    });
+
+    test('wafAllowedIpv4Cidrs / wafAllowedIpv6Cidrs で国に依らない許可を追加できる', () => {
+      const t = synthWith('CidrStack', {
+        wafAllowedIpv4Cidrs: '203.0.113.4/32, 198.51.100.0/24',
+        wafAllowedIpv6Cidrs: '2001:db8::/32',
+      });
+      const props = webAcl(t);
+      expect(props.Rules.map((r) => [r.Priority, r.Name])).toEqual([
+        [0, 'AllowVpcEgress'], [1, 'AllowListedIpv4'], [2, 'AllowListedIpv6'], [3, 'AllowedCountries'],
+      ]);
+      t.hasResourceProperties('AWS::WAFv2::IPSet', {
+        IPAddressVersion: 'IPV4',
+        Addresses: ['203.0.113.4/32', '198.51.100.0/24'],
+      });
+      t.hasResourceProperties('AWS::WAFv2::IPSet', {
+        IPAddressVersion: 'IPV6',
+        Addresses: ['2001:db8::/32'],
+      });
+    });
+
+    test('ALB SG の受信は 0.0.0.0/0:443 の 1 件のみで、WAF で制御する旨が記録される', () => {
+      const albSg = Object.entries(template.findResources('AWS::EC2::SecurityGroup'))
+        .find(([, r]) => (r as { Properties: { GroupDescription?: string } }).Properties.GroupDescription === 'ALB');
+      const albSgId = albSg?.[0];
+      expect(albSgId).toBeDefined();
+      const ingress = (albSg?.[1] as { Properties: { SecurityGroupIngress?: { CidrIp?: string; FromPort?: number; Description?: string }[] } })
+        .Properties.SecurityGroupIngress ?? [];
+      expect(ingress.map((r) => `${String(r.CidrIp)}:${String(r.FromPort)}`)).toEqual(['0.0.0.0/0:443']);
+      // addIngressRule deduplicates by peer and port, so the rule declared in
+      // buildNetwork is the one that survives; the description proves it is
+      // ours and not the one the listener would have added.
+      expect(ingress[0].Description).toContain('WAF web ACL');
+      // No separate ingress resource may target the ALB SG either (that is how
+      // the listener would add its own 0.0.0.0/0 rule).
+      const separate = Object.entries(template.findResources('AWS::EC2::SecurityGroupIngress'))
+        .filter(([, r]) => JSON.stringify((r as { Properties: Record<string, unknown> }).Properties.GroupId).includes(String(albSgId)));
+      expect(separate.map(([id]) => id)).toEqual([]);
+    });
+
+    test('対照: リスナーは open 既定で 0.0.0.0/0 を追加し、open:false なら追加しない', () => {
+      /**
+       * Ingress rules of a control stack whose listener gets the given open value.
+       *
+       * @param open - Value passed to addListener (undefined = library default).
+       * @returns Entries such as "0.0.0.0/0:443".
+       */
+      function ingressWith(open: boolean | undefined): string[] {
+        const stack = new cdk.Stack(new cdk.App(), `Listener${String(open)}`, { env: { account: '111122223333', region: 'us-east-1' } });
+        const vpc = new ec2.Vpc(stack, 'Vpc', { maxAzs: 2, natGateways: 0 });
+        const sg = new ec2.SecurityGroup(stack, 'Sg', { vpc });
+        const alb = new elbv2.ApplicationLoadBalancer(stack, 'Alb', { vpc, internetFacing: true, securityGroup: sg });
+        alb.addListener('L', { port: 443, protocol: elbv2.ApplicationProtocol.HTTP, open, defaultAction: elbv2.ListenerAction.fixedResponse(200) });
+        return Object.values(Template.fromStack(stack).findResources('AWS::EC2::SecurityGroup'))
+          .flatMap((r) => (r as { Properties: { SecurityGroupIngress?: { CidrIp?: string; FromPort?: number }[] } }).Properties.SecurityGroupIngress ?? [])
+          .map((i) => `${String(i.CidrIp)}:${String(i.FromPort)}`);
+      }
+      expect(ingressWith(undefined)).toEqual(['0.0.0.0/0:443']);
+      expect(ingressWith(false)).toEqual([]);
     });
   });
 
