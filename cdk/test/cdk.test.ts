@@ -8,6 +8,7 @@ import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 
 import { NextcloudAioStack } from '../lib/cdk-stack';
 import { TLS_REQUIRED_MESSAGE } from '../lib/stack/load-balancer';
+import { execRolloutOverride } from '../lib/stack/service-factory';
 import {
   CfnResources,
   ec2PublicPlacementViolations,
@@ -445,15 +446,46 @@ describe('NextcloudAioStack', () => {
       }));
     });
 
-    test('Exec を使うサービスだけで有効にする', () => {
+    test('Exec はセッションを記録できるサービスだけで有効にする（apache は script が無いため無効）', () => {
       expect(execPerService()).toEqual({
         nextcloud: true,
-        apache: true,
+        apache: false,
         Talk: true,
         notifypush: false,
         onlyoffice: false,
         imaginary: false,
       });
+    });
+
+    test('Exec を明示的に設定したサービスは、設定から導いた nonce で強制デプロイする', () => {
+      const forced: Record<string, unknown> = {};
+      for (const [id, svc] of Object.entries(template.findResources('AWS::ECS::Service'))) {
+        forced[id.replace(/Service[0-9A-F]+$/, '')] = (svc as { Properties: { ForceNewDeployment?: unknown } }).Properties.ForceNewDeployment;
+      }
+      const disabled = { EnableForceNewDeployment: true, ForceNewDeploymentNonce: 'execute-command-disabled' };
+      expect(forced).toEqual({
+        nextcloud: undefined,
+        apache: disabled,
+        Talk: undefined,
+        notifypush: disabled,
+        onlyoffice: disabled,
+        imaginary: disabled,
+      });
+    });
+
+    test('execRolloutOverride: 既定（未指定）は何も付けず、指定時は値ごとに一定の nonce', () => {
+      expect(execRolloutOverride(undefined)).toEqual({});
+      expect(execRolloutOverride(false)).toEqual({ forceNewDeployment: { enabled: true, nonce: 'execute-command-disabled' } });
+      expect(execRolloutOverride(true)).toEqual({ forceNewDeployment: { enabled: true, nonce: 'execute-command-enabled' } });
+      // Same input, same nonce: repeated deploys do not roll the service again.
+      expect(execRolloutOverride(false)).toEqual(execRolloutOverride(false));
+      expect(execRolloutOverride(true).forceNewDeployment?.nonce).not.toBe(execRolloutOverride(false).forceNewDeployment?.nonce);
+    });
+
+    test('同じ設定で 2 回 synth しても ForceNewDeployment は変わらない（冪等）', () => {
+      const pick = (t: Template): string => JSON.stringify(Object.values(t.findResources('AWS::ECS::Service'))
+        .map((s) => (s as { Properties: { ForceNewDeployment?: unknown } }).Properties.ForceNewDeployment));
+      expect(pick(synthTemplate())).toBe(pick(template));
     });
 
     test('タスクロールは Exec ログ用の権限だけを持つ（鍵は専用 CMK、ログは専用グループ）', () => {

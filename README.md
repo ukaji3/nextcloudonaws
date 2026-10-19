@@ -38,7 +38,7 @@ docs/                    デプロイメントガイド
 
 | ファイル | 変更内容 |
 |---|---|
-| `containers/nextcloud/Dockerfile` | `app/` 依存除去、COPY パス変更、AIO_TOKEN/AIO_URL 削除、aws-cli 追加（アップグレード SFN の config.php バックアップ用）、`AIO_LOG_LEVEL` デフォルト定義、`clear_env = no` |
+| `containers/nextcloud/Dockerfile` | `app/` 依存除去、COPY パス変更、AIO_TOKEN/AIO_URL 削除、aws-cli 追加（アップグレード SFN の config.php バックアップ用）、util-linux-misc 追加（ECS Exec のセッション記録に必要な `script`）、`AIO_LOG_LEVEL` デフォルト定義、`clear_env = no` |
 | `containers/nextcloud/config/redis.config.php` | ElastiCache Serverless 用に全面書き換え（`REDIS_TLS_ENABLED` による TLS 接続、クラスタモード設定） |
 | `containers/nextcloud/entrypoint.sh` | rsync に `--inplace` 付与（EFS 対応）、custom_apps 入れ子ディレクトリの自己修復（`aws_repair_custom_apps_and_upgrade` を3箇所で実行）、OpenSearch 互換パッチ（ProductCheckTrait / EndpointTrait 呼び出し無効化 / highlight `max_analyzer_offset`）、`fulltextsearch_elasticsearch:configure` の出力抑止（資格情報をログに出さない）、末尾に AWS 固有ブロック（旧版が置いた独自ファイルの除去・redis セッションハンドラ除去・redis.config.php 保全・PHP-FPM 追加設定） |
 | `containers/nextcloud/aws-custom-apps-repair.sh` | 独自追加。EFS 上でアプリ更新後に生じる入れ子ディレクトリの修復ライブラリ（テスト: `containers/nextcloud/tests/`） |

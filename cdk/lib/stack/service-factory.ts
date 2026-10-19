@@ -43,8 +43,10 @@ export interface ServiceOptions {
    *
    * ECS Exec runs commands as root inside the container and the injected
    * secrets are visible in that shell, so it is turned off for services that
-   * are never debugged this way. Changing the flag replaces the running tasks,
-   * because ECS cannot turn Exec on or off for an existing task.
+   * are never debugged this way. ECS cannot turn Exec on or off for a running
+   * task; when this flag is given explicitly, the service gets a
+   * force-new-deployment nonce derived from it (see execRolloutOverride), so a
+   * change of the flag replaces the running tasks in the same deploy.
    */
   readonly enableExecuteCommand?: boolean;
 }
@@ -57,6 +59,41 @@ export interface ServiceBaselineCounts {
   readonly nextcloud: number;
   readonly apache: number;
   readonly notifyPush: number;
+}
+
+/**
+ * Force-new-deployment settings of a service whose ECS Exec flag is set
+ * explicitly.
+ */
+export interface ExecRolloutOverride {
+  readonly forceNewDeployment?: ecs.ForceNewDeployment;
+}
+
+/**
+ * Make a change of the ECS Exec flag reach the running tasks.
+ *
+ * CloudFormation updates EnableExecuteCommand on the service without
+ * replacing its tasks, and ECS cannot change Exec on a running task, so the
+ * flag would only apply to tasks started later. The nonce is derived from the
+ * flag itself: it changes exactly when the flag changes, which starts one
+ * rolling deployment, and stays the same on every other deploy (idempotent).
+ *
+ * Services that keep the default (flag not given) get no override, so adding
+ * this mechanism does not roll them.
+ *
+ * @param enableExecuteCommand - The explicit Exec flag, or undefined for the default.
+ * @returns Properties to spread into the service props.
+ */
+export function execRolloutOverride(enableExecuteCommand: boolean | undefined): ExecRolloutOverride {
+  if (enableExecuteCommand === undefined) {
+    return {};
+  }
+  return {
+    forceNewDeployment: {
+      enabled: true,
+      nonce: enableExecuteCommand ? 'execute-command-enabled' : 'execute-command-disabled',
+    },
+  };
 }
 
 /**
@@ -89,6 +126,7 @@ export function createFargateService(
     },
     enableExecuteCommand: opts?.enableExecuteCommand ?? true,
     circuitBreaker: { enable: true, rollback: true },
+    ...execRolloutOverride(opts?.enableExecuteCommand),
   });
 
   if (opts?.maxCapacity) {

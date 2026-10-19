@@ -235,6 +235,10 @@ RUN set -ex; \
         imagemagick-svg \
         imagemagick-heic \
         imagemagick-tiff \
+# nextcloudonaws: util-linux-misc provides /usr/bin/script, which the ECS Exec
+# agent needs to record sessions in the Exec audit log group (without it the
+# session works but nothing is logged).
+        util-linux-misc \
         coreutils; \
     \
     grep -q '^pm = dynamic' /usr/local/etc/php-fpm.d/www.conf; \

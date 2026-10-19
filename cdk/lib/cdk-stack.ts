@@ -130,8 +130,11 @@ export class NextcloudAioStack extends cdk.Stack {
     });
 
     const apacheTd = buildApacheTask(this, config, common, files);
+    // ECS Exec is off: the upstream apache image has no `script`, so sessions
+    // could not be recorded in the Exec audit log group.
     const apacheSvc = createFargateService(ctx, 'apache', apacheTd, {
       desiredCount: SERVICE_BASELINE.apache, minCapacity: 2, maxCapacity: 5, managedDesiredCount: true,
+      enableExecuteCommand: false,
     });
     apacheSvc.node.addDependency(nextcloudSvc);
 

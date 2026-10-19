@@ -784,7 +784,7 @@ HTTPS:                 強制
 | `containers/nextcloud/entrypoint.sh` | 修正 | 下記の変更を含む |
 | `containers/nextcloud/aws-custom-apps-repair.sh` | 追加 | custom_apps 入れ子ディレクトリの修復ライブラリ（10.2 参照） |
 | `containers/nextcloud/tests/test-aws-custom-apps-repair.sh` | 追加 | 上記ライブラリのテスト（`bash containers/nextcloud/tests/test-aws-custom-apps-repair.sh`） |
-| `containers/nextcloud/Dockerfile` | 修正 | aws-cli 追加、`clear_env = no`（upstream AIO main に同期済み。PHP 8.4 / dinit / su-exec） |
+| `containers/nextcloud/Dockerfile` | 修正 | aws-cli 追加、util-linux-misc 追加（ECS Exec のセッション記録用 `script`）、`clear_env = no`（upstream AIO main に同期済み。PHP 8.4 / dinit / su-exec） |
 | `containers/nextcloud/aws-healthcheck.sh` | 追加 | ECS 用ヘルスチェック（15 章参照、テスト: `tests/test-aws-healthcheck.sh`） |
 
 ### 10.1 entrypoint.sh の変更内容
@@ -1203,14 +1203,15 @@ ECR のレジストリスキャン（BASIC、プッシュ時）を `ecrScanRepos
 
 ### 14.7 デバッグ（ECS Exec）
 
-ECS Exec はコンテナ内で root のシェルを開き、注入したシークレットも参照できるため、実際に使うサービスだけで有効にする。
+ECS Exec はコンテナ内で root のシェルを開き、注入したシークレットも参照できる。そのため、セッションを記録できて実際に使うサービスだけで有効にする。
 
 | サービス | `enableExecuteCommand` | 理由 |
 |---|---|---|
-| nextcloud / apache / talk | `true` | occ の実行・設定確認・TURN の調査に使う |
+| nextcloud / talk | `true` | occ の実行・設定確認・TURN の調査に使う。どちらのイメージにも記録に必要な `script` がある（nextcloud は Dockerfile で `util-linux-misc` を追加） |
+| apache | `false` | upstream のイメージに `script` が無く、セッションを記録できない |
 | notify-push / onlyoffice / imaginary | `false` | 運用上シェルに入る必要がない（2026-10-14 時点で過去 90 日の利用実績 0 件） |
 
-セッションの記録は専用のロググループ（`ExecAudit`、カスタマーマネージド KMS キーで暗号化、1 年保持）に出力する。クラスタ設定を省略した場合の既定（`DEFAULT`）はタスク定義の awslogs、つまりアプリケーションログと同じロググループに混在するため、`OVERRIDE` で分離している。
+セッションの記録は専用のロググループ（`ExecAudit`、カスタマーマネージド KMS キーで暗号化、1 年保持）に出力する。クラスタ設定を省略した場合の既定（`DEFAULT`）はタスク定義の awslogs、つまりアプリケーションログと同じロググループに混在するため、`OVERRIDE` で分離している。記録はコンテナ内の `script` と `cat` で行われるため、どちらかが無いイメージではセッション自体は動いても何も記録されない（AWS 公式ドキュメント「Logging using ECS Exec」）。
 
 ```bash
 aws ecs execute-command \
@@ -1222,7 +1223,8 @@ aws ecs execute-command \
 ```
 
 - 実行する IAM プリンシパルには `ecs:ExecuteCommand` と、セッション暗号化のための `kms:GenerateDataKey`（上記の KMS キー）が必要
-- `enableExecuteCommand` の変更はタスクの入れ替えを伴う（ECS は稼働中タスクの Exec 設定を変更できない）
+- 手元の session-manager-plugin は **1.2.804.0 以降**が必要。暗号化されたセッションではプラグインが自分の資格情報で KMS を呼ぶが、それより前の版（aws-sdk-go v1）は `aws login` の資格情報を読めず、`Encountered error while initiating handshake. Handshake timed out.` で失敗する（コンテナ側エージェントのハンドシェイク待ちは 15 秒）
+- ECS は稼働中タスクの Exec 設定を変更できない。`createFargateService` に `enableExecuteCommand` を明示したサービスは、その値から導いた `ForceNewDeployment` の nonce（`execute-command-enabled` / `execute-command-disabled`）を持ち、値を変えたデプロイでだけタスクが入れ替わる。既定値のまま（未指定）のサービスと、独自に定義している talk はこの仕組みの対象外で、設定を変えた場合は次のタスク入れ替えで反映される
 
 ---
 
