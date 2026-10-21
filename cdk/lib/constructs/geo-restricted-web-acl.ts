@@ -10,7 +10,12 @@ import { Construct } from 'constructs';
 export interface GeoRestrictedWebAclProps {
   /** Load balancer the web ACL is attached to. */
   readonly loadBalancer: elbv2.IApplicationLoadBalancer;
-  /** ISO 3166 alpha-2 codes allowed to reach the load balancer (e.g. ["JP"]). */
+  /**
+   * ISO 3166 alpha-2 codes allowed to reach the load balancer (e.g. ["JP"]).
+   * May be empty to allow only the configured IP ranges (for example while an
+   * unpatched vulnerability is being handled); at least one country or one
+   * CIDR is required so the ACL can never lock every client out.
+   */
   readonly allowedCountries: readonly string[];
   /**
    * IPv4 addresses always allowed regardless of country: the NAT Gateway
@@ -55,6 +60,8 @@ interface IpRuleSpec {
  *  1. AllowListedIpv4  - configured IPv4 CIDRs (only when configured)
  *  2. AllowListedIpv6  - configured IPv6 CIDRs (only when configured)
  *  3. AllowedCountries - source IP geolocating to an allowed country
+ *                        (omitted when no country is allowed, so only the
+ *                        IP ranges pass)
  *
  * The client location comes from the connection source IP (the ALB is the edge,
  * so no forwarded-IP header is trusted). AWS WAF resolves it with the MaxMind
@@ -76,15 +83,16 @@ export class GeoRestrictedWebAcl extends Construct {
    */
   public constructor(scope: Construct, id: string, props: GeoRestrictedWebAclProps) {
     super(scope, id);
-    if (props.allowedCountries.length === 0) {
-      throw new Error('GeoRestrictedWebAcl: allowedCountries must not be empty');
+    const allowedCidrCount = (props.allowedIpv4Cidrs?.length ?? 0) + (props.allowedIpv6Cidrs?.length ?? 0);
+    if (props.allowedCountries.length === 0 && allowedCidrCount === 0) {
+      throw new Error('GeoRestrictedWebAcl: allow at least one country or one CIDR; otherwise every client is blocked');
     }
     const stackName = cdk.Stack.of(this).stackName;
 
     this.webAcl = new wafv2.CfnWebACL(this, 'WebAcl', {
       scope: 'REGIONAL',
       defaultAction: { block: {} },
-      description: `Block every request except ${props.allowedCountries.join(', ')} and the configured IP ranges`,
+      description: GeoRestrictedWebAcl.describe(props.allowedCountries),
       visibilityConfig: GeoRestrictedWebAcl.visibility(`${stackName}-geo-acl`),
       rules: this.buildRules(props),
     });
@@ -153,16 +161,29 @@ export class GeoRestrictedWebAcl extends Construct {
         addresses: props.allowedIpv6Cidrs,
       });
     }
-    return [
-      ...specs.map((spec) => this.ipSetRule(spec)),
-      {
+    const rules = specs.map((spec) => this.ipSetRule(spec));
+    if (props.allowedCountries.length > 0) {
+      rules.push({
         name: 'AllowedCountries',
         priority: PRIORITY.countries,
         action: { allow: {} },
         statement: { geoMatchStatement: { countryCodes: [...props.allowedCountries] } },
         visibilityConfig: GeoRestrictedWebAcl.visibility('AllowedCountries'),
-      },
-    ];
+      });
+    }
+    return rules;
+  }
+
+  /**
+   * Description of the web ACL.
+   *
+   * @param allowedCountries - Allowed countries (may be empty).
+   * @returns Human-readable summary of what passes.
+   */
+  private static describe(allowedCountries: readonly string[]): string {
+    return allowedCountries.length > 0
+      ? `Block every request except ${allowedCountries.join(', ')} and the configured IP ranges`
+      : 'Block every request except the configured IP ranges (no country is allowed)';
   }
 
   /**

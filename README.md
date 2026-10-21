@@ -73,7 +73,7 @@ npx cdk deploy
 | `auroraBackupRetentionDays` | Aurora 自動バックアップの保持日数（既定 7） |
 | `backupDailyRetentionDays` / `backupWeeklyRetentionDays` | AWS Backup の保持日数（既定 35 / 90） |
 | `ecrScanRepositories` | プッシュ時スキャン対象の ECR リポジトリ（既定 `aio-nextcloud`） |
-| `wafAllowedCountries` | ALB に到達できる国（ISO 3166 alpha-2、カンマ区切り、既定 `JP`） |
+| `wafAllowedCountries` | ALB に到達できる国（ISO 3166 alpha-2、カンマ区切り、既定 `JP`）。`none` で国による許可をなくし、許可 CIDR だけを通す（CIDR も空ならエラー） |
 | `wafAllowedIpv4Cidrs` / `wafAllowedIpv6Cidrs` | 国に依らず許可する CIDR（カンマ区切り、既定は空）。許可国以外から使う拠点の固定 IP を登録する |
 | `aioImageTag` / `aioNotifyPushImageTag` | AIO 周辺イメージのタグ（notify-push は省略時 `aioImageTag` と同じ） |
 

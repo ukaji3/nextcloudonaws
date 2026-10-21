@@ -306,6 +306,29 @@ describe('NextcloudAioStack', () => {
       });
     });
 
+    test('wafAllowedCountries=none: 国ルールを作らず、NAT と許可 CIDR だけを通す', () => {
+      const t = synthWith('IpOnlyStack', { wafAllowedCountries: 'none', wafAllowedIpv4Cidrs: '203.0.113.4/32' });
+      const props = webAcl(t);
+      expect(props.DefaultAction).toEqual({ Block: {} });
+      expect(props.Rules.map((r) => [r.Priority, r.Name])).toEqual([[0, 'AllowVpcEgress'], [1, 'AllowListedIpv4']]);
+      expect(JSON.stringify(props.Rules)).not.toContain('GeoMatchStatement');
+      t.hasResourceProperties('AWS::WAFv2::IPSet', { IPAddressVersion: 'IPV4', Addresses: ['203.0.113.4/32'] });
+    });
+
+    test('wafAllowedCountries=none で CIDR も無い場合は synth を失敗させる（全利用者の締め出し防止）', () => {
+      expect(() => synthWith('LockoutStack', { wafAllowedCountries: 'NONE' }))
+        .toThrow('allow at least one country or one CIDR');
+    });
+
+    test('wafAllowedCountries が未設定・空文字なら既定の JP（"none" だけが国なしを意味する）', () => {
+      for (const [id, value] of [['UnsetStack', undefined], ['EmptyStack', '']] as const) {
+        const overrides: Record<string, string> = value === undefined ? {} : { wafAllowedCountries: value };
+        const props = webAcl(synthWith(id, overrides));
+        expect(props.Rules.find((r) => r.Name === 'AllowedCountries')?.Statement)
+          .toEqual({ GeoMatchStatement: { CountryCodes: ['JP'] } });
+      }
+    });
+
     test('ALB SG の受信は 0.0.0.0/0:443 の 1 件のみで、WAF で制御する旨が記録される', () => {
       const albSg = Object.entries(template.findResources('AWS::EC2::SecurityGroup'))
         .find(([, r]) => (r as { Properties: { GroupDescription?: string } }).Properties.GroupDescription === 'ALB');

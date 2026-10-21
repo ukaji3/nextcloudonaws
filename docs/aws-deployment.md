@@ -641,6 +641,18 @@ ALB に AWS WAF（リージョナル）の Web ACL を関連付ける。既定�
 ```
 
 - 国の判定には接続元 IP を使う（ALB が入口なので X-Forwarded-For は使わない）。判定は MaxMind の GeoIP データベースによるため、VPN やプロキシの所在国で決まる
+- `wafAllowedCountries` を `"none"` にすると `AllowedCountries` ルールを作らず、NAT Gateway の EIP と許可 CIDR だけが通る。未修正の脆弱性への対応中など、一時的に特定の IP 以外を遮断するときに使う。許可 CIDR も空の場合は全員が締め出されるため synth がエラーになる。空文字は既定の `JP` 扱いになる（`"none"` だけが「国なし」を意味する）
+
+```json
+{
+  "context": {
+    "wafAllowedCountries": "none",
+    "wafAllowedIpv4Cidrs": "203.0.113.4/32"
+  }
+}
+```
+
+  元に戻すときは `wafAllowedCountries` を `"JP"`（または削除）に戻し、不要になった CIDR を外して `cdk deploy` する
 - 許可国以外から使うユーザーは、その拠点の固定 IP を `wafAllowedIpv4Cidrs` / `wafAllowedIpv6Cidrs` に登録する。IP が変わる環境では登録できないため、許可国を増やすか別の経路を用意する
 - ALB のセキュリティグループは 0.0.0.0/0:443 を許可し、到達できるクライアントの制御は WAF で行う（リスナーは `open: false` で作り、暗黙の許可ルールを作らせない）
 - ログは遮断したリクエストだけを CloudWatch Logs `aws-waf-logs-<スタック名>`（30 日保持）に記録する。`authorization` / `cookie` / `requesttoken` ヘッダは伏せる

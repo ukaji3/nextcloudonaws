@@ -31,7 +31,10 @@ export interface StackConfig {
   readonly backupWeeklyRetentionDays: number;
   /** ECR repositories scanned on push. */
   readonly ecrScanRepositories: readonly string[];
-  /** Countries (ISO 3166 alpha-2) allowed through the ALB web ACL. */
+  /**
+   * Countries (ISO 3166 alpha-2) allowed through the ALB web ACL. Empty when
+   * the context value is "none" (only the IP ranges below are allowed).
+   */
   readonly wafAllowedCountries: readonly string[];
   readonly wafAllowedIpv4Cidrs: readonly string[];
   readonly wafAllowedIpv6Cidrs: readonly string[];
@@ -125,6 +128,24 @@ function contextList(scope: Construct, key: string, fallback: string): readonly 
 }
 
 /**
+ * Value of `wafAllowedCountries` that allows no country at all, so only the
+ * NAT Gateway IPs and the configured CIDRs reach the ALB. An empty string
+ * cannot express this because empty context values fall back to the default.
+ */
+export const WAF_NO_COUNTRY = 'none';
+
+/**
+ * Read the countries allowed through the ALB web ACL.
+ *
+ * @param scope - Construct whose node holds the context.
+ * @returns Country codes; empty when `wafAllowedCountries` is "none".
+ */
+function wafCountries(scope: Construct): readonly string[] {
+  const countries = contextList(scope, 'wafAllowedCountries', 'JP');
+  return countries.length === 1 && countries[0].toLowerCase() === WAF_NO_COUNTRY ? [] : countries;
+}
+
+/**
  * Load every deployment parameter from the CDK context.
  *
  * @param scope - Stack whose node holds the context.
@@ -153,7 +174,7 @@ export function loadStackConfig(scope: Construct): StackConfig {
     backupDailyRetentionDays: contextNumber(scope, 'backupDailyRetentionDays', 35),
     backupWeeklyRetentionDays: contextNumber(scope, 'backupWeeklyRetentionDays', 90),
     ecrScanRepositories: contextList(scope, 'ecrScanRepositories', 'aio-nextcloud'),
-    wafAllowedCountries: contextList(scope, 'wafAllowedCountries', 'JP'),
+    wafAllowedCountries: wafCountries(scope),
     wafAllowedIpv4Cidrs: contextList(scope, 'wafAllowedIpv4Cidrs', ''),
     wafAllowedIpv6Cidrs: contextList(scope, 'wafAllowedIpv6Cidrs', ''),
   };
