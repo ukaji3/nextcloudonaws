@@ -38,6 +38,13 @@ export interface GeoRestrictedWebAclProps {
 /** Request headers that carry credentials and must not be written to the logs. */
 const REDACTED_HEADERS = ['authorization', 'cookie', 'requesttoken'];
 
+/**
+ * Pattern AWS WAF enforces on the Description of web ACLs and IP sets
+ * (from the CreateWebACL validation error). Descriptions outside it make the
+ * stack update fail at deploy time, not at synth time.
+ */
+export const WEB_ACL_DESCRIPTION_PATTERN = /^[\w+=:#@/\-,.][\w+=:#@/\-,.\s]+[\w+=:#@/\-,.]$/;
+
 /** Rule priorities. Lower numbers are evaluated first. */
 const PRIORITY = { vpcEgress: 0, ipv4: 1, ipv6: 2, countries: 3 } as const;
 
@@ -175,7 +182,8 @@ export class GeoRestrictedWebAcl extends Construct {
   }
 
   /**
-   * Description of the web ACL.
+   * Description of the web ACL. AWS WAF only accepts letters, digits, spaces
+   * and `_+=:#@/-,.` here (see WEB_ACL_DESCRIPTION_PATTERN).
    *
    * @param allowedCountries - Allowed countries (may be empty).
    * @returns Human-readable summary of what passes.
@@ -183,7 +191,7 @@ export class GeoRestrictedWebAcl extends Construct {
   private static describe(allowedCountries: readonly string[]): string {
     return allowedCountries.length > 0
       ? `Block every request except ${allowedCountries.join(', ')} and the configured IP ranges`
-      : 'Block every request except the configured IP ranges (no country is allowed)';
+      : 'Block every request except the configured IP ranges, no country is allowed';
   }
 
   /**

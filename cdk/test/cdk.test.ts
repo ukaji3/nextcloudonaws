@@ -7,6 +7,7 @@ import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 
 import { NextcloudAioStack } from '../lib/cdk-stack';
+import { WEB_ACL_DESCRIPTION_PATTERN } from '../lib/constructs/geo-restricted-web-acl';
 import { TLS_REQUIRED_MESSAGE } from '../lib/stack/load-balancer';
 import { execRolloutOverride } from '../lib/stack/service-factory';
 import {
@@ -327,6 +328,27 @@ describe('NextcloudAioStack', () => {
         expect(props.Rules.find((r) => r.Name === 'AllowedCountries')?.Statement)
           .toEqual({ GeoMatchStatement: { CountryCodes: ['JP'] } });
       }
+    });
+
+    test('Web ACL と IP セットの説明文は WAF API の文字制約を満たす（synth では検出されずデプロイで失敗するため）', () => {
+      const variants: Record<string, string>[] = [
+        {},
+        { wafAllowedCountries: 'JP, US' },
+        { wafAllowedCountries: 'none', wafAllowedIpv4Cidrs: '203.0.113.4/32' },
+        { wafAllowedIpv4Cidrs: '203.0.113.4/32', wafAllowedIpv6Cidrs: '2001:db8::/32' },
+      ];
+      variants.forEach((overrides, i) => {
+        const t = synthWith(`DescStack${String(i)}`, overrides);
+        const descriptions = [
+          ...Object.values(t.findResources('AWS::WAFv2::WebACL')),
+          ...Object.values(t.findResources('AWS::WAFv2::IPSet')),
+        ].map((r) => (r as { Properties: { Description?: string } }).Properties.Description ?? '');
+        for (const d of descriptions) {
+          expect({ overrides, d, ok: WEB_ACL_DESCRIPTION_PATTERN.test(d) }).toEqual({ overrides, d, ok: true });
+        }
+      });
+      // Control: the description that failed on 2026-10-21 is rejected by the pattern.
+      expect(WEB_ACL_DESCRIPTION_PATTERN.test('Block every request except the configured IP ranges (no country is allowed)')).toBe(false);
     });
 
     test('ALB SG の受信は 0.0.0.0/0:443 の 1 件のみで、WAF で制御する旨が記録される', () => {
