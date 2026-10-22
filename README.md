@@ -47,7 +47,7 @@ docs/                    デプロイメントガイド
 | `containers/nextcloud/aws-talk-servers.sh` | 独自追加。以前の版が登録した誤った TURN/STUN（`<domain>:3478`）を、正しい `turn.<domain>:3478` の登録後に削除（テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/aws-legacy-files.sh` | 独自追加。旧版が Web ルートに置いた独自ファイル（`diag.php`）を起動時に除去（テスト: `containers/nextcloud/tests/`） |
 
-同期状況: Nextcloud 34.0.4 / PHP 8.4.26 / dinit。upstream AIO main `da7cf9d7`（2026-10-08）に同期済みで、上表以外のファイル（start.sh・notify*.sh・dinit.d/・config/ の大半など）は upstream と同一。以前の redis-patch.php（Redis.php の全置換）は、Nextcloud 33.0.7 以降の公式実装が SCAN + UNLINK に変わったため撤去した。
+同期状況: Nextcloud 34.0.4 / PHP 8.4.27 / dinit。upstream AIO main `da7cf9d7`（2026-10-08）に同期済みで、上表以外のファイル（start.sh・notify*.sh・dinit.d/・config/ の大半など）は upstream と同一。PHP は CVE-2026-109618 / CVE-2026-109619 の修正版 8.4.27 に上げている（upstream の PHP 更新コミット `5979d230` 相当のみ取り込み、Nextcloud 35 系への更新は未取り込み）。以前の redis-patch.php（Redis.php の全置換）は、Nextcloud 33.0.7 以降の公式実装が SCAN + UNLINK に変わったため撤去した。
 
 ## デプロイ
 
