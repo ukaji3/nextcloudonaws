@@ -16,6 +16,8 @@ ENV NEXTCLOUD_VERSION=34.0.4
 COPY --chmod=775 containers/nextcloud/*.sh /
 COPY --chmod=774 containers/nextcloud/upgrade.exclude /upgrade.exclude
 COPY containers/nextcloud/config/*.php /
+# nextcloudonaws: PHP settings read after every other conf.d file (see the file for details)
+COPY containers/nextcloud/php/zz-aws-hardening.ini /usr/local/etc/php/conf.d/zz-aws-hardening.ini
 COPY containers/nextcloud/dinit.d/ /etc/dinit.d/
 COPY containers/nextcloud/root.motd /root.motd
 

@@ -38,7 +38,7 @@ docs/                    デプロイメントガイド
 
 | ファイル | 変更内容 |
 |---|---|
-| `containers/nextcloud/Dockerfile` | `app/` 依存除去、COPY パス変更、AIO_TOKEN/AIO_URL 削除、aws-cli 追加（アップグレード SFN の config.php バックアップ用）、util-linux-misc 追加（ECS Exec のセッション記録に必要な `script`）、`AIO_LOG_LEVEL` デフォルト定義、`clear_env = no` |
+| `containers/nextcloud/Dockerfile` | `app/` 依存除去、COPY パス変更、AIO_TOKEN/AIO_URL 削除、aws-cli 追加（アップグレード SFN の config.php バックアップ用）、util-linux-misc 追加（ECS Exec のセッション記録に必要な `script`）、PHP 追加設定 `zz-aws-hardening.ini` の COPY、`AIO_LOG_LEVEL` デフォルト定義、`clear_env = no` |
 | `containers/nextcloud/config/redis.config.php` | ElastiCache Serverless 用に全面書き換え（`REDIS_TLS_ENABLED` による TLS 接続、クラスタモード設定） |
 | `containers/nextcloud/entrypoint.sh` | rsync に `--inplace` 付与（EFS 対応）、custom_apps 入れ子ディレクトリの自己修復（`aws_repair_custom_apps_and_upgrade` を3箇所で実行）、OpenSearch 互換パッチ（ProductCheckTrait / EndpointTrait 呼び出し無効化 / highlight `max_analyzer_offset`）、`fulltextsearch_elasticsearch:configure` の出力抑止（資格情報をログに出さない）、末尾に AWS 固有ブロック（旧版が置いた独自ファイルの除去・redis セッションハンドラ除去・redis.config.php 保全・PHP-FPM 追加設定） |
 | `containers/nextcloud/aws-custom-apps-repair.sh` | 独自追加。EFS 上でアプリ更新後に生じる入れ子ディレクトリの修復ライブラリ（テスト: `containers/nextcloud/tests/`） |
@@ -46,6 +46,7 @@ docs/                    デプロイメントガイド
 | `containers/nextcloud/aws-trusted-proxies.sh` | 独自追加。NAT Gateway の EIP（`AWS_TRUSTED_PROXIES`）を `trusted_proxies` 20〜29 番に設定（notify_push 用。テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/aws-talk-servers.sh` | 独自追加。以前の版が登録した誤った TURN/STUN（`<domain>:3478`）を、正しい `turn.<domain>:3478` の登録後に削除（テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/aws-legacy-files.sh` | 独自追加。旧版が Web ルートに置いた独自ファイル（`diag.php`）を起動時に除去（テスト: `containers/nextcloud/tests/`） |
+| `containers/nextcloud/php/zz-aws-hardening.ini` | 独自追加。PHP の追加設定（conf.d の最後に読まれる）。`session.upload_progress.enabled = 0`（Nextcloud は未使用、CVE-2026-109619 のアドバイザリが無効化を推奨。テスト: `containers/nextcloud/tests/`） |
 
 同期状況: Nextcloud 34.0.4 / PHP 8.4.27 / dinit。upstream AIO main `da7cf9d7`（2026-10-08）に同期済みで、上表以外のファイル（start.sh・notify*.sh・dinit.d/・config/ の大半など）は upstream と同一。PHP は CVE-2026-109618 / CVE-2026-109619 の修正版 8.4.27 に上げている（upstream の PHP 更新コミット `5979d230` 相当のみ取り込み、Nextcloud 35 系への更新は未取り込み）。以前の redis-patch.php（Redis.php の全置換）は、Nextcloud 33.0.7 以降の公式実装が SCAN + UNLINK に変わったため撤去した。
 

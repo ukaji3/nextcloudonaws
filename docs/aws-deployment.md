@@ -796,7 +796,8 @@ HTTPS:                 強制
 | `containers/nextcloud/entrypoint.sh` | 修正 | 下記の変更を含む |
 | `containers/nextcloud/aws-custom-apps-repair.sh` | 追加 | custom_apps 入れ子ディレクトリの修復ライブラリ（10.2 参照） |
 | `containers/nextcloud/tests/test-aws-custom-apps-repair.sh` | 追加 | 上記ライブラリのテスト（`bash containers/nextcloud/tests/test-aws-custom-apps-repair.sh`） |
-| `containers/nextcloud/Dockerfile` | 修正 | aws-cli 追加、util-linux-misc 追加（ECS Exec のセッション記録用 `script`）、`clear_env = no`（upstream AIO main に同期済み。PHP 8.4 / dinit / su-exec） |
+| `containers/nextcloud/Dockerfile` | 修正 | aws-cli 追加、util-linux-misc 追加（ECS Exec のセッション記録用 `script`）、PHP 追加設定の COPY、`clear_env = no`（upstream AIO main に同期済み。PHP 8.4 / dinit / su-exec） |
+| `containers/nextcloud/php/zz-aws-hardening.ini` | 追加 | PHP の追加設定（`/usr/local/etc/php/conf.d/` の最後に読まれる）。`session.upload_progress.enabled = 0`: スクリプト実行前に POST の内容だけで動く機能で、Nextcloud は使っていない（アップロードは WebDAV の PUT）。CVE-2026-109619 のアドバイザリが、修正版の適用後も未使用なら無効化を推奨（テスト: `tests/test-aws-php-ini.sh`） |
 | `containers/nextcloud/aws-healthcheck.sh` | 追加 | ECS 用ヘルスチェック（15 章参照、テスト: `tests/test-aws-healthcheck.sh`） |
 
 ### 10.1 entrypoint.sh の変更内容
