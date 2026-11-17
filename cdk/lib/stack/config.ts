@@ -1,3 +1,4 @@
+import { Annotations } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 
 /**
@@ -8,7 +9,7 @@ export interface StackConfig {
   readonly certificateArn: string;
   readonly hostedZoneId: string;
   readonly hostedZoneName: string;
-  /** Tag of the AIO images (apache, onlyoffice, imaginary, talk). */
+  /** Tag of the AIO images (apache, imaginary, talk). */
   readonly aioImageTag: string;
   /**
    * Tag of the notify-push image (defaults to {@link aioImageTag}).
@@ -17,7 +18,6 @@ export interface StackConfig {
   readonly aioNotifyPushImageTag: string;
   readonly nextcloudImageUri: string;
   readonly apachePort: number;
-  readonly enableOnlyOffice: boolean;
   readonly enableTalk: boolean;
   readonly enableFulltextsearch: boolean;
   readonly enableImaginary: boolean;
@@ -146,12 +146,36 @@ function wafCountries(scope: Construct): readonly string[] {
 }
 
 /**
+ * Context keys that earlier versions read and this version ignores.
+ * `enableOnlyOffice`: the OnlyOffice document server was removed (2026-11).
+ */
+export const REMOVED_CONTEXT_KEYS: readonly string[] = ['enableOnlyOffice'];
+
+/**
+ * Warn about context keys this version no longer reads, so a stale cdk.json
+ * does not look like it still configures something.
+ *
+ * @param scope - Construct whose node holds the context.
+ */
+function warnRemovedContextKeys(scope: Construct): void {
+  for (const key of REMOVED_CONTEXT_KEYS) {
+    if (readContext(scope, key) !== undefined) {
+      Annotations.of(scope).addWarningV2(
+        `nextcloudonaws:removedContext:${key}`,
+        `Context "${key}" is no longer used and is ignored; remove it from cdk.json.`,
+      );
+    }
+  }
+}
+
+/**
  * Load every deployment parameter from the CDK context.
  *
  * @param scope - Stack whose node holds the context.
  * @returns Typed configuration.
  */
 export function loadStackConfig(scope: Construct): StackConfig {
+  warnRemovedContextKeys(scope);
   // AIO v14.4.3: the last AIO release for Nextcloud 34 (aio-nextcloud of this tag is 34.0.5).
   const aioImageTag = contextString(scope, 'aioImageTag', '20261029_171813');
   return {
@@ -163,7 +187,6 @@ export function loadStackConfig(scope: Construct): StackConfig {
     aioNotifyPushImageTag: contextString(scope, 'aioNotifyPushImageTag', aioImageTag),
     nextcloudImageUri: contextString(scope, 'nextcloudImageUri', `ghcr.io/nextcloud-releases/aio-nextcloud:${aioImageTag}`),
     apachePort: contextNumber(scope, 'apachePort', 11000),
-    enableOnlyOffice: contextFlag(scope, 'enableOnlyOffice'),
     enableTalk: contextFlag(scope, 'enableTalk'),
     enableFulltextsearch: contextFlag(scope, 'enableFulltextsearch'),
     enableImaginary: contextFlag(scope, 'enableImaginary'),

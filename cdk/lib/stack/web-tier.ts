@@ -113,7 +113,8 @@ export function buildApacheTask(
       APACHE_HOST: 'nextcloud-aio-apache.nextcloud.local',
       NEXTCLOUD_HOST: 'nextcloud-aio-nextcloud.nextcloud.local',
       NOTIFY_PUSH_HOST: 'nextcloud-aio-notify-push.nextcloud.local',
-      ONLYOFFICE_HOST: config.enableOnlyOffice ? 'nextcloud-aio-onlyoffice.nextcloud.local' : 'localhost',
+      // No office suite in this stack: "localhost" is how AIO marks a disabled backend.
+      ONLYOFFICE_HOST: 'localhost',
       TALK_HOST: config.enableTalk ? 'nextcloud-aio-talk.nextcloud.local' : 'localhost',
       COLLABORA_HOST: 'localhost',
       WHITEBOARD_HOST: 'localhost',
@@ -169,53 +170,6 @@ export function buildNotifyPushTask(
   });
   container.addMountPoints({ sourceVolume: 'nextcloud-html', containerPath: '/var/www/html', readOnly: true });
   return td;
-}
-
-/**
- * Create the OnlyOffice document server (task definition, data access point, service).
- *
- * @param ctx - Shared service placement.
- * @param config - Deployment parameters.
- * @param common - Roles and log group.
- * @param files - EFS file system.
- * @param jwtSecret - JWT secret shared with Nextcloud.
- */
-export function buildOnlyOfficeService(
-  ctx: ServiceContext,
-  config: StackConfig,
-  common: TaskCommon,
-  files: FileSystemResources,
-  jwtSecret: secretsmanager.ISecret,
-): void {
-  const apOnlyoffice = files.fileSystem.addAccessPoint('OnlyofficeData', {
-    path: '/onlyoffice-data',
-    posixUser: { uid: '104', gid: '104' },
-    createAcl: { ownerUid: '104', ownerGid: '104', permissions: '777' },
-  });
-  const td = new ecs.FargateTaskDefinition(ctx.scope, 'OnlyofficeTd', {
-    cpu: 2048, memoryLimitMiB: 4096,
-    taskRole: common.taskRole, executionRole: common.executionRole,
-  });
-  addEfsVolume(td, 'onlyoffice-data', files.fileSystem.fileSystemId, apOnlyoffice.accessPointId);
-  const container = td.addContainer('onlyoffice', {
-    image: aioImage('onlyoffice', config.aioImageTag),
-    logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'onlyoffice', logGroup: common.logGroup }),
-    portMappings: [{ containerPort: 80 }],
-    healthCheck: placeholderHealthCheck(30, 9, 120),
-    environment: {
-      JWT_ENABLED: 'true',
-      JWT_HEADER: 'AuthorizationJwt',
-      TZ: 'Asia/Tokyo',
-    },
-    secrets: {
-      JWT_SECRET: ecs.Secret.fromSecretsManager(jwtSecret),
-    },
-  });
-  container.addMountPoints({ sourceVolume: 'onlyoffice-data', containerPath: '/var/lib/onlyoffice', readOnly: false });
-  createFargateService(ctx, 'onlyoffice', td, { enableExecuteCommand: false });
-  NagSuppressions.addResourceSuppressions(td, [
-    { id: 'AwsSolutions-ECS2', reason: 'Non-sensitive configuration values (feature flags) passed as environment variables' },
-  ]);
 }
 
 /**

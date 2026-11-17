@@ -1094,6 +1094,13 @@ aws_repair_custom_apps_and_upgrade() {
     fi
 }
 aws_repair_custom_apps_and_upgrade
+# This stack has no OnlyOffice document server: remove the onlyoffice app and
+# its settings left by earlier versions (no-op once removed, or when
+# ONLYOFFICE_ENABLED=yes). Runs after the repair above, so a nested
+# custom_apps/onlyoffice is already fixed. See /aws-onlyoffice-removal.sh.
+# shellcheck source=aws-onlyoffice-removal.sh
+. /aws-onlyoffice-removal.sh
+aws_remove_onlyoffice
 # --- AWS deployment customizations end (nextcloudonaws) ---
 
 # Fulltextsearch

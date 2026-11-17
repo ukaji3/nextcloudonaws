@@ -19,8 +19,8 @@ export interface GeoRestrictedWebAclProps {
   readonly allowedCountries: readonly string[];
   /**
    * IPv4 addresses always allowed regardless of country: the NAT Gateway
-   * public IPs, because tasks inside the VPC (notify_push, OnlyOffice,
-   * Nextcloud itself) call the public URL.
+   * public IPs, because tasks inside the VPC (notify_push, Nextcloud itself)
+   * call the public URL.
    */
   readonly alwaysAllowedIpv4: readonly string[];
   /**

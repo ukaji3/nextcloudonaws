@@ -12,7 +12,6 @@
     "aioImageTag": "20261029_171813",
     "nextcloudImageUri": "",
     "apachePort": 11000,
-    "enableOnlyOffice": "true",
     "enableTalk": "false",
     "enableFulltextsearch": "false",
     "enableImaginary": "false",
