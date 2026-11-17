@@ -26,6 +26,8 @@ COPY --chmod=774 containers/nextcloud/upgrade.exclude /upgrade.exclude
 COPY containers/nextcloud/config/*.php /
 # nextcloudonaws: PHP settings read after every other conf.d file (see the file for details)
 COPY containers/nextcloud/php/zz-aws-hardening.ini /usr/local/etc/php/conf.d/zz-aws-hardening.ini
+# nextcloudonaws: php-fpm pool settings read after every other php-fpm.d file (see the file for details)
+COPY containers/nextcloud/php-fpm.d/zzz-custom.conf /usr/local/etc/php-fpm.d/zzz-custom.conf
 COPY containers/nextcloud/dinit.d/ /etc/dinit.d/
 COPY containers/nextcloud/root.motd /root.motd
 
@@ -180,6 +182,12 @@ RUN set -ex; \
         echo 'redis.session.lock_expire = 60'; \
         echo 'session.gc_maxlifetime = 86400'; \
     } > /usr/local/etc/php/conf.d/redis-session.ini; \
+# nextcloudonaws: do not use the Redis session handler. ElastiCache Serverless
+# runs in cluster mode, which session.save_handler=redis (one node) cannot use,
+# so PHP keeps its default file sessions. entrypoint.sh used to delete this
+# file at runtime as www-data, which the root-owned config directories (see
+# the end of this RUN) no longer allow.
+    rm /usr/local/etc/php/conf.d/redis-session.ini; \
     \
     mkdir -p /var/www/data; \
     chown -R www-data:root /var/www; \
@@ -308,8 +316,9 @@ RUN set -ex; \
     echo "[ -n \"\$TERM\" ] && [ -f /root.motd ] && cat /root.motd" >> /root/.bashrc; \
     \
     chown www-data:root -R /usr/src && \
-    chmod 777 -R /usr/local/etc/php/conf.d && \
-    chmod 777 -R /usr/local/etc/php-fpm.d && \
+    chown -R root:root /usr/local/etc/php/conf.d /usr/local/etc/php-fpm.d && \
+    find /usr/local/etc/php/conf.d /usr/local/etc/php-fpm.d -type d -exec chmod 755 {} + && \
+    find /usr/local/etc/php/conf.d /usr/local/etc/php-fpm.d -type f -exec chmod 644 {} + && \
     chmod -R 777 /tmp; \
     chmod -R 777 /etc/openldap; \
     \

@@ -614,29 +614,22 @@ if [ -z "$OBJECTSTORE_S3_BUCKET" ] && [ -z "$OBJECTSTORE_SWIFT_URL" ]; then
 fi
 
 # --- AWS deployment customizations start (nextcloudonaws) ---
-# Apply custom PHP-FPM config (always, regardless of version)
 # (The former redis-patch.php, which replaced lib/private/Memcache/Redis.php to
 # use SCAN instead of KEYS, was removed: Nextcloud ships a SCAN + UNLINK,
 # cluster-safe clear() since 33.0.7, and overwriting the file with a copy from
 # an older release would downgrade core code.)
+# (The removal of the Redis session handler and the extra php-fpm pool settings
+# moved into the image: Dockerfile and php-fpm.d/zzz-custom.conf. This script
+# runs as www-data, which cannot write the root-owned PHP config directories.)
 # Remove files earlier versions of this stack installed into the web root
 # (diag.php: unauthenticated Redis probe, reported as EXTRA_FILE by
 # "occ integrity:check-core"). The copy on EFS outlives the image change.
 # shellcheck source=aws-legacy-files.sh
 . /aws-legacy-files.sh
 aws_remove_legacy_webroot_files /var/www/html
-# Remove Redis session handler - ElastiCache Serverless is cluster-mode, PHP session.save_handler=redis is non-cluster
-rm -f /usr/local/etc/php/conf.d/redis-session.ini
 # Ensure redis.config.php exists on EFS (rsync in version_greater block may skip it)
 [ -f "$SOURCE_LOCATION/config/redis.config.php" ] && [ ! -f /var/www/html/config/redis.config.php ] && \
     cp "$SOURCE_LOCATION/config/redis.config.php" /var/www/html/config/redis.config.php
-cat > /usr/local/etc/php-fpm.d/zzz-custom.conf << 'FPMEOF'
-[www]
-clear_env = no
-request_slowlog_timeout = 10
-request_terminate_timeout = 60
-slowlog = /proc/self/fd/2
-FPMEOF
 # --- AWS deployment customizations end (nextcloudonaws) ---
 
 # Perform fingerprint update if instance was restored
