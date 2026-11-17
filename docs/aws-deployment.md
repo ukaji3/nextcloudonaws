@@ -1071,6 +1071,17 @@ aws stepfunctions send-task-failure --task-token '<taskToken>'
 
 所要時間の目安（2026-10-11 実績）: 33.0.7 → 33.0.9 で約 57 分、33.0.9 → 34.0.4（メジャー更新）で約 65 分。Phase 1 が約 15 分、新タスクの起動とアップグレード（rsync・`occ upgrade` 2 回・code integrity check）が約 30 分。この間サービスは停止する。
 
+2026-11-17 実績（34.0.4 → 34.0.6、実行 `upgrade-3406-202611171034`）: 合計 約 83 分（10:34:03〜11:57:20 JST）。
+
+| 区間 | 所要時間 | 内訳 |
+|---|---|---|
+| Phase 1（MaintenanceOn〜WaitForDeploy） | 約 20 分 | MaintenanceOn 8 分（one-off タスクの起動と entrypoint.sh を含む）、縮退 16 秒、Aurora スナップショット 4.5 分、BackupConfig 7 分 |
+| operator（WaitForDeploy の間） | 約 16 分 | AWS Backup のオンデマンドバックアップ 8 分（EFS 1 分未満、Aurora 8 分。EFS と Aurora を同時に開始）、`cdk diff` 約 1 分、`cdk deploy` 約 5 分 |
+| Phase 2 のうち ALB ターゲットが healthy になるまで | 約 37 分 | タスクの起動 約 1 分、アプリの無効化と `app:update --all` 7 分、rsync（`Initializing Nextcloud`）12 分、`occ upgrade` 10 分、アプリの再有効化・DB 最適化・設定の適用 約 6.5 分 |
+| Phase 2 のうち VerifyUpgrade・MaintenanceOffFinal | 約 10.5 分 | one-off タスク 2 回（各 5〜5.5 分） |
+
+ALB ターゲットが healthy になったのは 11:46:44 で、VerifyUpgrade と MaintenanceOffFinal はその後に走る。
+
 メジャー更新前には AWS Backup のオンデマンドバックアップ（EFS と Aurora）も取っておく。また、メジャー更新では entrypoint.sh がアプリを一旦無効化し、更新後に元へ戻す。戻せなかったアプリは管理者に通知されるので、完了後に `occ app:list` で確認する。
 
 ### 13.3 ロールバック

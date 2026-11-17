@@ -138,7 +138,7 @@ aws sqs receive-message --queue-url <UpgradeQueueUrl> --wait-time-seconds 20
 aws stepfunctions send-task-success --task-token '<taskToken>' --task-output '{}'
 ```
 
-失敗時はステートマシンが desired count を復元する（ベストエフォート）。DB の復旧はスナップショット `pre-upgrade-<executionId>` から、EFS は AWS Backup の復旧ポイントから行う。アップグレードの間（33.0.7 → 33.0.9 で約 57 分、33.0.9 → 34.0.4 で約 65 分）はサービスが停止する。
+失敗時はステートマシンが desired count を復元する（ベストエフォート）。DB の復旧はスナップショット `pre-upgrade-<executionId>` から、EFS は AWS Backup の復旧ポイントから行う。アップグレードの間（33.0.7 → 33.0.9 で約 57 分、33.0.9 → 34.0.4 で約 65 分、34.0.4 → 34.0.6 でオンデマンドバックアップを含め約 83 分）はサービスが停止する。
 
 ## upstream の更新追従
 
