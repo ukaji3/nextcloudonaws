@@ -196,6 +196,13 @@ else
     check "削除できない: 終了コード 0" "0" "$rc"
     check "削除できない: 次回の起動で再試行すると警告する" "yes" "$(grep -q 'will be retried on next start' <<< "$out" && echo yes || echo no)"
     check "削除できない: ディレクトリは残る" "present" "$(presence "$AWS_ONLYOFFICE_APP_DIR")"
+    check "削除できない: app config は残す（次回まとめて削除）" "DocumentServerUrl,enabled,installed_version,jwt_secret" "$(app_keys onlyoffice)"
+    check "削除できない: config.php の onlyoffice は残す（次回まとめて削除）" "onlyoffice,trusted_domains" "$(system_keys)"
+    # 9: the next start (directory now removable) completes the whole removal.
+    out="$(aws_remove_onlyoffice)"
+    check "次回の起動: ディレクトリを削除する" "absent" "$(presence "$AWS_ONLYOFFICE_APP_DIR")"
+    check "次回の起動: app config を削除する" "" "$(app_keys onlyoffice)"
+    check "次回の起動: config.php の onlyoffice を削除する" "trusted_domains" "$(system_keys)"
     teardown
 fi
 

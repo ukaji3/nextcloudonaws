@@ -19,6 +19,8 @@
 #   2. every app config value of "onlyoffice" (including "enabled" and
 #      "installed_version", so Nextcloud forgets the app)
 #   3. the system config key "onlyoffice"
+# Steps 2 and 3 run only once the directory is gone, so a directory that cannot
+# be removed keeps the app and its settings together for the next attempt.
 # Database tables created by the app's migrations (oc_onlyoffice_*) and their
 # oc_migrations rows are kept: Nextcloud does not drop them on removal, and
 # they are reused if the app is installed again.
@@ -117,12 +119,17 @@ aws_remove_onlyoffice_system_config() {
 }
 
 # Remove the onlyoffice app and its settings unless OnlyOffice is enabled.
+# The settings are deleted only after the app directory is gone: if the
+# directory cannot be removed, everything is kept and the whole removal runs
+# again on the next start (app and settings stay consistent).
 # Always returns 0: a failure is reported and retried on the next start.
 aws_remove_onlyoffice() {
     if [ "${ONLYOFFICE_ENABLED:-}" = yes ]; then
         return 0
     fi
-    aws_remove_onlyoffice_app_dir
+    if ! aws_remove_onlyoffice_app_dir; then
+        return 0
+    fi
     aws_remove_onlyoffice_app_config
     aws_remove_onlyoffice_system_config
     return 0
