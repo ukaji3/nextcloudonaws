@@ -20,13 +20,12 @@ import { applyNagSuppressions } from './stack/nag-suppressions';
 import { buildNetwork, NetworkResources } from './stack/network';
 import { buildNextcloudTask } from './stack/nextcloud-task';
 import { createFargateService, ServiceBaselineCounts, ServiceContext } from './stack/service-factory';
-import { buildBuckets, buildFileSystem, FileSystemResources } from './stack/storage';
+import { buildBuckets, buildFileSystem } from './stack/storage';
 import { buildUpgradeStateMachine } from './stack/upgrade-state-machine';
 import {
   buildApacheTask,
   buildImaginaryService,
   buildNotifyPushTask,
-  buildOnlyOfficeService,
   buildTalkService,
   TaskCommon,
 } from './stack/web-tier';
@@ -35,16 +34,14 @@ import {
 const SERVICE_BASELINE: ServiceBaselineCounts = { nextcloud: 1, apache: 2, notifyPush: 1 };
 
 /**
- * Inputs of the optional services (OnlyOffice, Imaginary, Talk).
+ * Inputs of the optional services (Imaginary, Talk).
  */
 interface OptionalServicesInput {
   readonly config: StackConfig;
   readonly ctx: ServiceContext;
   readonly common: TaskCommon;
-  readonly files: FileSystemResources;
   readonly network: NetworkResources;
   readonly featureSecrets: FeatureSecrets;
-  readonly onlyofficeSecret: secretsmanager.ISecret;
   readonly hostedZone?: route53.IHostedZone;
   /** TURN/STUN host for clients (see the constructor). */
   readonly turnDomain: string;
@@ -60,9 +57,9 @@ interface OptionalServices {
 
 /**
  * Nextcloud on AWS: ECS Fargate (AIO containers) with Aurora Serverless v2,
- * ElastiCache Serverless, S3, EFS and optional OpenSearch / OnlyOffice /
- * Imaginary / Talk. Every resource is created by the builders in ./stack and
- * ./constructs with this stack as scope, so logical IDs stay stable.
+ * ElastiCache Serverless, S3, EFS and optional OpenSearch / Imaginary / Talk.
+ * Every resource is created by the builders in ./stack and ./constructs with
+ * this stack as scope, so logical IDs stay stable.
  */
 export class NextcloudAioStack extends cdk.Stack {
   /**
@@ -106,7 +103,7 @@ export class NextcloudAioStack extends cdk.Stack {
     const namespace = new servicediscovery.PrivateDnsNamespace(this, 'Namespace', { name: 'nextcloud.local', vpc: network.vpc });
     const ctx: ServiceContext = { scope: this, cluster, namespace, ecsSg: network.ecsSg };
 
-    const { taskRole, executionRole, adminSecret, onlyofficeSecret } = buildTaskRoles(this, { bucket, dbSecret, cacheSecret, featureSecrets });
+    const { taskRole, executionRole, adminSecret } = buildTaskRoles(this, { bucket, dbSecret, cacheSecret, featureSecrets });
     const { logGroup, auditFn } = buildLogging(this);
     const common: TaskCommon = { taskRole, executionRole, logGroup };
 
@@ -120,7 +117,7 @@ export class NextcloudAioStack extends cdk.Stack {
 
     const nextcloud = buildNextcloudTask(this, {
       config, taskRole, executionRole, logGroup, files, bucket, dbCluster, dbSecret, cache,
-      adminSecret, onlyofficeSecret, featureSecrets, osDomain, trustedProxies: network.natPublicIps, turnDomain,
+      adminSecret, featureSecrets, osDomain, trustedProxies: network.natPublicIps, turnDomain,
     });
     // nextcloud / apache / notify-push: the upgrade state machine owns their
     // desired count (scale to 0, restore SERVICE_BASELINE), so CloudFormation
@@ -145,7 +142,7 @@ export class NextcloudAioStack extends cdk.Stack {
     notifySvc.node.addDependency(nextcloudSvc);
 
     const optional = this.buildOptionalServices({
-      config, ctx, common, files, network, featureSecrets, onlyofficeSecret, hostedZone, turnDomain,
+      config, ctx, common, network, featureSecrets, hostedZone, turnDomain,
     });
     talkNlb.dnsName = optional.talkNlb?.loadBalancerDnsName;
 
@@ -198,7 +195,7 @@ export class NextcloudAioStack extends cdk.Stack {
 
     applyNagSuppressions({
       albSg: network.albSg, executionRole, taskRole, sfnRole, auditFn,
-      secrets: this.collectSecrets([dbSecret, cacheSecret, adminSecret, onlyofficeSecret], featureSecrets),
+      secrets: this.collectSecrets([dbSecret, cacheSecret, adminSecret], featureSecrets),
       taskDefinitions: [nextcloud.taskDefinition, apacheTd, notifyTd, ...optional.taskDefinitions],
       accessLogBucket, dbCluster, osDomain, talkNlb: optional.talkNlb,
     });
@@ -221,7 +218,7 @@ export class NextcloudAioStack extends cdk.Stack {
   }
 
   /**
-   * Create OnlyOffice, Imaginary and Talk according to the feature flags.
+   * Create Imaginary and Talk according to the feature flags.
    *
    * @param input - Shared resources and feature flags.
    * @returns Task definitions needing the ECS2 exception, and the Talk NLB.
@@ -231,9 +228,6 @@ export class NextcloudAioStack extends cdk.Stack {
     const taskDefinitions: ecs.TaskDefinition[] = [];
     let talkNlb: elbv2.NetworkLoadBalancer | undefined;
 
-    if (config.enableOnlyOffice) {
-      buildOnlyOfficeService(ctx, config, common, input.files, input.onlyofficeSecret);
-    }
     if (config.enableImaginary && s.imaginarySecret) {
       taskDefinitions.push(buildImaginaryService(ctx, config, common, s.imaginarySecret));
     }

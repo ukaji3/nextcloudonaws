@@ -11,7 +11,6 @@ Nextcloud AIO のコンテナイメージを AWS ECS Fargate 上でデプロイ�
                               ├─► [ECS Service] Apache (Caddy)
                               │       ├─► [ECS Service] Nextcloud PHP-FPM
                               │       ├─► [ECS Service] Notify-push (※無効)
-                              │       ├─► [ECS Service] OnlyOffice (オプション)
                               │       ├─► [ECS Service] Talk (オプション)
                               │       └─► [ECS Service] Imaginary (オプション)
                               │
@@ -25,10 +24,10 @@ Nextcloud AIO のコンテナイメージを AWS ECS Fargate 上でデプロイ�
 ### 設計方針
 
 - **CloudFront は使用しない** — Nextcloud は WebDAV プロトコル（PROPFIND, MKCOL, MOVE, LOCK 等）を使用するが、CloudFront はこれらの HTTP メソッドをサポートしていない
-- **Collabora は使用しない** — `CAP_SYS_ADMIN` / `SYS_CHROOT` が必要だが Fargate は非対応。代わりに OnlyOffice を使用する
+- **Office ファイルの編集機能は提供しない** — Collabora は `CAP_SYS_ADMIN` / `SYS_CHROOT` が必要だが Fargate は非対応（16 章）。以前は OnlyOffice を使っていたが、upstream AIO で非推奨になったため 2026-11 に削除した（後継の EuroOffice へも移行しない。#5）
 - **notify_push は Nextcloud の config.php を共有して動く** — notify-push コンテナは `/var/www/html`（EFS）を読み取り専用でマウントし、DB と Redis（クラスタモード・TLS）の設定を config.php から読む。資格情報は環境変数で渡さない
 - **DB/Redis/ファイルストレージは全て AWS マネージドサービスに外部化** — コンテナをステートレスにし、水平スケーリングを可能にする
-- **シークレットは Secrets Manager で管理** — DB パスワード、OpenSearch パスワード、OnlyOffice JWT シークレット等は全て Secrets Manager に格納し、ECS タスク定義から参照する
+- **シークレットは Secrets Manager で管理** — DB パスワード、OpenSearch パスワード、Talk / Imaginary のシークレット等は全て Secrets Manager に格納し、ECS タスク定義から参照する
 
 ---
 
@@ -50,7 +49,6 @@ VPC (10.0.0.0/16)
 | ALB | 443/tcp | 0.0.0.0/0 |
 | ECS タスク (Apache) | 11000/tcp | ALB SG |
 | ECS タスク (Nextcloud) | 9000/tcp, 9001/tcp | Apache SG |
-| ECS タスク (OnlyOffice) | 80/tcp | Apache SG |
 | ECS タスク (Talk) | 8081/tcp | Apache SG |
 | ECS タスク (Notify-push) | 7867/tcp | Apache SG |
 | ECS タスク (Whiteboard) | 3002/tcp | Apache SG |
@@ -66,7 +64,6 @@ VPC (10.0.0.0/16)
 |---|---|---|
 | apache | `nextcloud-aio-apache.nextcloud.local` | 11000 |
 | nextcloud | `nextcloud-aio-nextcloud.nextcloud.local` | 9000 |
-| onlyoffice | `nextcloud-aio-onlyoffice.nextcloud.local` | 80 |
 | talk | `nextcloud-aio-talk.nextcloud.local` | 8081, 3478 |
 | notify-push | `nextcloud-aio-notify-push.nextcloud.local` | 7867 |
 | whiteboard | `nextcloud-aio-whiteboard.nextcloud.local` | 3002 |
@@ -296,14 +293,13 @@ EFS ファイルシステム
 │   ├── パス: /nextcloud-html
 │   ├── POSIX UID: 33 (www-data)
 │   └── POSIX GID: 33
-├── アクセスポイント: apache-data
-│   ├── パス: /apache-data
-│   ├── POSIX UID: 33
-│   └── POSIX GID: 33
-└── アクセスポイント: onlyoffice-data (オプション)
-    ├── パス: /onlyoffice-data
-    └── POSIX UID: 104
+└── アクセスポイント: apache-data
+    ├── パス: /apache-data
+    ├── POSIX UID: 33
+    └── POSIX GID: 33
 ```
+
+以前の版は OnlyOffice 用のアクセスポイント `onlyoffice-data`（パス `/onlyoffice-data`）を作っていた。アクセスポイントは OnlyOffice の削除（2026-11）とともに無くなったが、EFS 上の `/onlyoffice-data` のデータは残している（#5）。
 
 ### 5.2 タスク定義でのボリュームマウント
 
@@ -330,7 +326,6 @@ EFS ファイルシステム
 | Apache | `/var/www/html` | RO | nextcloud-html |
 | Notify-push | `/var/www/html` | RO | nextcloud-html |
 | Apache | `/mnt/data` | RW | apache-data |
-| OnlyOffice | `/var/lib/onlyoffice` | RW | onlyoffice-data |
 
 ---
 
@@ -383,9 +378,7 @@ EFS ファイルシステム
         { "name": "PHP_UPLOAD_LIMIT",  "value": "16G" },
         { "name": "PHP_MAX_TIME",      "value": "3600" },
         { "name": "TZ",               "value": "Asia/Tokyo" },
-        { "name": "ONLYOFFICE_ENABLED", "value": "yes" },
-        { "name": "ONLYOFFICE_HOST",   "value": "nextcloud-aio-onlyoffice.nextcloud.local" },
-        { "name": "ONLYOFFICE_SECRET", "value": "<onlyoffice-secret>" },
+        { "name": "ONLYOFFICE_ENABLED", "value": "no" },
         { "name": "TALK_ENABLED",      "value": "no" },
         { "name": "CLAMAV_ENABLED",    "value": "no" },
         { "name": "COLLABORA_ENABLED", "value": "no" },
@@ -456,7 +449,7 @@ EFS ファイルシステム
         { "name": "NEXTCLOUD_HOST",  "value": "nextcloud-aio-nextcloud.nextcloud.local" },
         { "name": "COLLABORA_HOST",  "value": "localhost" },
         { "name": "NOTIFY_PUSH_HOST","value": "nextcloud-aio-notify-push.nextcloud.local" },
-        { "name": "ONLYOFFICE_HOST", "value": "nextcloud-aio-onlyoffice.nextcloud.local" },
+        { "name": "ONLYOFFICE_HOST", "value": "localhost" },
         { "name": "TALK_HOST",       "value": "nextcloud-aio-talk.nextcloud.local" },
         { "name": "WHITEBOARD_HOST", "value": "nextcloud-aio-whiteboard.nextcloud.local" },
         { "name": "HARP_HOST",       "value": "localhost" },
@@ -505,75 +498,24 @@ EFS ファイルシステム
 }
 ```
 
-### 6.3 OnlyOffice (オプション)
+### 6.3 Office ドキュメントの編集（提供しない）
 
-```json
-{
-  "family": "nextcloud-aio-onlyoffice",
-  "networkMode": "awsvpc",
-  "requiresCompatibilities": ["FARGATE"],
-  "cpu": "2048",
-  "memory": "4096",
-  "containerDefinitions": [
-    {
-      "name": "init-volumes",
-      "image": "ghcr.io/nextcloud-releases/aio-alpine:20260218_123804",
-      "essential": false,
-      "command": ["chmod", "777", "/nextcloud-aio-onlyoffice"],
-      "mountPoints": [
-        { "sourceVolume": "onlyoffice-data", "containerPath": "/nextcloud-aio-onlyoffice" }
-      ]
-    },
-    {
-      "name": "onlyoffice",
-      "image": "ghcr.io/nextcloud-releases/aio-onlyoffice:20260218_123804",
-      "essential": true,
-      "dependsOn": [
-        { "containerName": "init-volumes", "condition": "SUCCESS" }
-      ],
-      "portMappings": [
-        { "containerPort": 80, "protocol": "tcp" }
-      ],
-      "environment": [
-        { "name": "JWT_ENABLED", "value": "true" },
-        { "name": "JWT_HEADER",  "value": "AuthorizationJwt" },
-        { "name": "JWT_SECRET",  "value": "<onlyoffice-secret>" },
-        { "name": "TZ",         "value": "Asia/Tokyo" }
-      ],
-      "mountPoints": [
-        { "sourceVolume": "onlyoffice-data", "containerPath": "/var/lib/onlyoffice" }
-      ],
-      "healthCheck": {
-        "command": ["CMD-SHELL", "/healthcheck.sh"],
-        "interval": 30,
-        "timeout": 30,
-        "retries": 9,
-        "startPeriod": 120
-      },
-      "logConfiguration": {
-        "logDriver": "awslogs",
-        "options": {
-          "awslogs-group": "/ecs/nextcloud-aio-onlyoffice",
-          "awslogs-region": "ap-northeast-1",
-          "awslogs-stream-prefix": "ecs"
-        }
-      }
-    }
-  ],
-  "volumes": [
-    {
-      "name": "onlyoffice-data",
-      "efsVolumeConfiguration": {
-        "fileSystemId": "fs-xxxxxxxxx",
-        "transitEncryption": "ENABLED",
-        "authorizationConfig": { "accessPointId": "fsap-onlyoffice-data" }
-      }
-    }
-  ]
-}
-```
+このスタックは Office ドキュメントの編集サーバーを動かさない。
 
-> **注意**: Collabora は `CAP_SYS_ADMIN` / `SYS_CHROOT` を必要とするため Fargate では動作しない。ドキュメント編集機能には OnlyOffice を使用する。
+- Collabora は `CAP_SYS_ADMIN` / `SYS_CHROOT` を必要とするため Fargate では動作しない（16 章）
+- OnlyOffice（ECS サービス `onlyoffice`、イメージ `aio-onlyoffice`）は以前の版で使っていたが、upstream AIO で非推奨になったため 2026-11 に削除した。後継の EuroOffice へも移行しない（#5）
+
+削除の内容:
+
+| 対象 | 扱い |
+|---|---|
+| ECS サービス・タスク定義・Cloud Map のサービス `nextcloud-aio-onlyoffice` | CDK から削除（`cdk deploy` で CloudFormation が削除する） |
+| JWT シークレット（Secrets Manager の `OnlyofficeSecret`） | CDK から削除 |
+| EFS のアクセスポイント `onlyoffice-data` | CDK から削除。EFS 上の `/onlyoffice-data` のデータは残す |
+| Nextcloud の onlyoffice アプリ、その app config、config.php の `onlyoffice` | `aws-onlyoffice-removal.sh` が起動時に削除（Nextcloud には `ONLYOFFICE_ENABLED=no` を渡す。`yes` のときは何もしない） |
+| Aurora の `oc_onlyoffice_*` テーブルと `oc_migrations` の行 | 残す（Nextcloud はアプリの削除でテーブルを消さない。アプリを入れ直すと再利用される） |
+
+Office ファイル自体はストレージに残り、ダウンロードしてローカルのアプリで編集できる。
 
 ---
 
@@ -624,7 +566,7 @@ ALB に AWS WAF（リージョナル）の Web ACL を関連付ける。既定�
 
 | 優先度 | ルール | 動作 | 作成条件 |
 |---|---|---|---|
-| 0 | `AllowVpcEgress` | NAT Gateway の EIP からのリクエストを許可（notify_push・OnlyOffice・Nextcloud 自身が VPC 内から公開 URL を呼ぶため） | 常に |
+| 0 | `AllowVpcEgress` | NAT Gateway の EIP からのリクエストを許可（notify_push・Nextcloud 自身が VPC 内から公開 URL を呼ぶため） | 常に |
 | 1 | `AllowListedIpv4` | `wafAllowedIpv4Cidrs` の CIDR を国に依らず許可 | `wafAllowedIpv4Cidrs` が空でない場合 |
 | 2 | `AllowListedIpv6` | `wafAllowedIpv6Cidrs` の CIDR を国に依らず許可 | `wafAllowedIpv6Cidrs` が空でない場合 |
 | 3 | `AllowedCountries` | 接続元 IP の国が `wafAllowedCountries`（既定 `JP`）なら許可 | 常に |
@@ -718,7 +660,6 @@ Kubernetes の HPA に相当する機能。
 |---|---|---|---|
 | Nextcloud | 2 | 10 | CPU 70% |
 | Apache | 2 | 5 | CPU 70% |
-| OnlyOffice | 1 | 3 | CPU 70% |
 | Notify-push | 1 | 2 | - |
 | Talk | 1 | 3 | CPU 70% |
 
@@ -800,6 +741,7 @@ HTTPS:                 強制
 | `containers/nextcloud/php/zz-aws-hardening.ini` | 追加 | PHP の追加設定（`/usr/local/etc/php/conf.d/` の最後に読まれる）。`session.upload_progress.enabled = 0`: スクリプト実行前に POST の内容だけで動く機能で、Nextcloud は使っていない（アップロードは WebDAV の PUT）。CVE-2026-109619 のアドバイザリが、修正版の適用後も未使用なら無効化を推奨（テスト: `tests/test-aws-php-ini.sh`） |
 | `containers/nextcloud/php-fpm.d/zzz-custom.conf` | 追加 | php-fpm のプール設定（`/usr/local/etc/php-fpm.d/` の最後に読まれる）。`clear_env = no`（ECS の環境変数を config/*.php の `getenv()` へ渡す）、`request_slowlog_timeout = 10` と `slowlog = /proc/self/fd/2`（10 秒を超えたリクエストのバックトレースを CloudWatch Logs へ）、`request_terminate_timeout = 60`。以前は entrypoint.sh が起動のたびに書いていた。PHP の設定ディレクトリは root 所有・他者書き込み不可（upstream `0bf4473c`）で、www-data で動く entrypoint.sh からは書けないため、イメージに含めた（テスト: `tests/test-aws-php-fpm.sh`） |
 | `containers/nextcloud/aws-healthcheck.sh` | 追加 | ECS 用ヘルスチェック（15 章参照、テスト: `tests/test-aws-healthcheck.sh`） |
+| `containers/nextcloud/aws-onlyoffice-removal.sh` | 追加 | `ONLYOFFICE_ENABLED` が `yes` 以外なら、旧版が入れた onlyoffice アプリと設定を起動時に削除する（6.3 参照、テスト: `tests/test-aws-onlyoffice-removal.sh`） |
 
 ### 10.1 entrypoint.sh の変更内容
 
@@ -807,6 +749,7 @@ HTTPS:                 強制
 |---|---|
 | `redis.config.php` の保持 | 環境変数から Redis 設定を自動構成するファイル。誤削除を防止 |
 | custom_apps 入れ子修復（3箇所） | 10.2 参照。Imaginary ブロック後・全文検索アプリ更新後・スクリプト末尾で実行し、修復した場合は `occ upgrade` も実行 |
+| onlyoffice アプリと設定の削除 | Imaginary ブロック後の修復の直後に実行（入れ子が直った状態で消す）。`occ app:remove onlyoffice`、app config の全キー、config.php の `onlyoffice` を、残っているものだけ削除する（6.3 参照） |
 | `fulltextsearch_elasticsearch:configure` の出力抑止 | 出力に `elastic_host`（OpenSearch の admin パスワードを含む）が出るため、CloudWatch Logs には成否のみ出力 |
 | OpenSearch 互換パッチ (ProductCheckTrait) | `X-Elastic-Product` ヘッダーチェックをスキップ |
 | OpenSearch 互換パッチ (EndpointTrait) | 互換ヘッダー付与（`vnd.elasticsearch+json`）の呼び出し行を無効化。適用できない場合は WARNING を出力 |
@@ -910,7 +853,6 @@ npm install
     "aioImageTag": "20261029_171813",
     "nextcloudImageUri": "<ACCOUNT_ID>.dkr.ecr.ap-northeast-1.amazonaws.com/aio-nextcloud:nc34.0.6-<timestamp>",
     "apachePort": 11000,
-    "enableOnlyOffice": "true",
     "enableTalk": "true",
     "enableFulltextsearch": "true",
     "enableImaginary": "true",
@@ -936,10 +878,9 @@ npm install
 | `certificateArn` | 既存 ACM 証明書の ARN。空の場合は `hostedZoneId` + `hostedZoneName` から自動発行する。どちらも無い場合は synth がエラーになる（TLS 必須） |
 | `hostedZoneId` | Route 53 ホストゾーン ID（指定時は証明書の自動発行と DNS レコード作成。`hostedZoneName` と対で指定） |
 | `hostedZoneName` | Route 53 ホストゾーン名（例: `example.com`） |
-| `aioImageTag` | AIO イメージ（apache / onlyoffice / imaginary / talk）のタグ |
+| `aioImageTag` | AIO イメージ（apache / imaginary / talk）のタグ |
 | `aioNotifyPushImageTag` | notify-push イメージのタグ（省略時は `aioImageTag` と同じ）。notify-push だけ別の版に固定したい場合に使う |
 | `nextcloudImageUri` | カスタムビルドした Nextcloud イメージの URI（空の場合は公式イメージ） |
-| `enableOnlyOffice` | OnlyOffice の有効化 |
 | `enableTalk` | Talk (TURN/シグナリング) の有効化 |
 | `enableFulltextsearch` | OpenSearch Service + 全文検索の有効化 |
 | `enableImaginary` | Imaginary (画像処理) の有効化 |
@@ -977,7 +918,7 @@ bash containers/nextcloud/tests/test-aws-custom-apps-repair.sh
 - S3 バケット（Intelligent-Tiering + バージョニング + アクセスログバケット）
 - OpenSearch Service ドメイン（enableFulltextsearch 時）
 - ECS Fargate クラスター + Cloud Map 名前空間
-- ECS Service: Nextcloud, Apache, Notify-push, OnlyOffice / Imaginary / Talk（オプション）
+- ECS Service: Nextcloud, Apache, Notify-push, Imaginary / Talk（オプション）
 - ALB + HTTPS リスナー
 - Auto Scaling (Nextcloud: 1-10, Apache: 2-5)
 - ACM 証明書 + Route 53 Alias レコード（hostedZoneId 指定時）
@@ -998,7 +939,7 @@ ECR リポジトリ `aio-nextcloud` はスタック外で作成済みのもの�
 | `lib/stack/network.ts` / `storage.ts` / `database.ts` | VPC・SG / EFS・S3 / Aurora・ElastiCache |
 | `lib/stack/feature-secrets.ts` | オプション機能のシークレットと OpenSearch |
 | `lib/stack/iam-and-logging.ts` | タスクロール・実行ロール・ログ・監査ログ転送 |
-| `lib/stack/nextcloud-task.ts` / `web-tier.ts` | Nextcloud タスク定義 / Apache・notify-push・OnlyOffice・Imaginary・Talk |
+| `lib/stack/nextcloud-task.ts` / `web-tier.ts` | Nextcloud タスク定義 / Apache・notify-push・Imaginary・Talk |
 | `lib/stack/load-balancer.ts` | ALB・証明書・DNS |
 | `lib/stack/upgrade-state-machine.ts` | アップグレード用 Step Functions |
 | `lib/stack/monitoring.ts` | アラーム・ダッシュボード |
@@ -1130,7 +1071,7 @@ CDK スタックに以下の監視設定が含まれている。
 
 | ソース | 出力先 | 保持期間 |
 |---|---|---|
-| ECS 全コンテナ (Nextcloud, Apache, Notify-push, OnlyOffice) | CloudWatch Logs (`EcsLogs`) | 30日 |
+| ECS 全コンテナ (Nextcloud, Apache, Notify-push, Imaginary, Talk) | CloudWatch Logs (`EcsLogs`) | 30日 |
 | 監査ログ (admin_audit: ファイルアクセス、ログイン等) | CloudWatch Logs (`AuditLogs`) | 365日 |
 | VPC Flow Log | CloudWatch Logs (`VpcFlowLogGroup`) | 30日 |
 | ALB アクセスログ | S3 (`AccessLogBucket/alb/`) | 無期限 |
@@ -1233,7 +1174,7 @@ ECS Exec はコンテナ内で root のシェルを開き、注入したシー�
 |---|---|---|
 | nextcloud / talk | `true` | occ の実行・設定確認・TURN の調査に使う。どちらのイメージにも記録に必要な `script` がある（nextcloud は Dockerfile で `util-linux-misc` を追加） |
 | apache | `false` | upstream のイメージに `script` が無く、セッションを記録できない |
-| notify-push / onlyoffice / imaginary | `false` | 運用上シェルに入る必要がない（2026-10-14 時点で過去 90 日の利用実績 0 件） |
+| notify-push / imaginary | `false` | 運用上シェルに入る必要がない（2026-10-14 時点で過去 90 日の利用実績 0 件） |
 
 セッションの記録は専用のロググループ（`ExecAudit`、カスタマーマネージド KMS キーで暗号化、1 年保持）に出力する。クラスタ設定を省略した場合の既定（`DEFAULT`）はタスク定義の awslogs、つまりアプリケーションログと同じロググループに混在するため、`OVERRIDE` で分離している。記録はコンテナ内の `script` と `cat` で行われるため、どちらかが無いイメージではセッション自体は動いても何も記録されない（AWS 公式ドキュメント「Logging using ECS Exec」）。
 
@@ -1259,7 +1200,7 @@ aws ecs execute-command \
 | notify_push と trusted proxy | push server は公開 URL 経由で Nextcloud に接続するため、Nextcloud には送信元として NAT Gateway の EIP が見える | CDK が NAT Gateway の EIP を `AWS_TRUSTED_PROXIES` で渡し、entrypoint.sh が `trusted_proxies` の 20〜29 番に毎回書き直す（`aws-trusted-proxies.sh`、テスト: `tests/test-aws-trusted-proxies.sh`）。NAT Gateway を作り直しても古い IP は残らない |
 | Nextcloud コンテナのヘルスチェック | `aws-healthcheck.sh` は php-fpm が待受を始めた時点で正常とする。インストール・アップグレード中（メンテナンスモード、`occ upgrade` / rsync 実行中）も正常扱いにして、途中で入れ替えられないようにしている。起動に時間がかかっても、新タスクが正常になるまで旧タスクが応答を続ける（2026-10-11 の検証で 10 秒間隔の監視 84 回中 83 回 200） | アップグレードを伴うイメージ更新は引き続き 13 章の手順で行う |
 | アプリ更新で custom_apps が入れ子になる | 該当アプリが認識されず停止する | entrypoint.sh が起動時に自動修復する（10.2 参照） |
-| Collabora 非対応 | ドキュメント編集に Collabora を使用できない | OnlyOffice を使用 |
+| Collabora 非対応 | ドキュメント編集に Collabora を使用できない | Office ドキュメントの編集機能は提供しない（6.3） |
 | `ecs execute-command` の出力制限 | 擬似 TTY が無いと出力が取れない | `script -qec "aws ecs execute-command ... --interactive --command '...'" /dev/null` で TTY を割り当てる |
 | mail アプリ | vendor ディレクトリが欠損しインストール不可 | `occ app:install mail` で再インストール |
 
@@ -1276,6 +1217,6 @@ Fargate で追加可能な Capability は `SYS_PTRACE` のみ。
 
 | 方法 | 説明 |
 |---|---|
-| OnlyOffice を使用（推奨） | 特権 Capability 不要。`ONLYOFFICE_ENABLED=yes` で切り替え |
+| OnlyOffice | 特権 Capability は不要。以前の版で使っていたが、upstream AIO で非推奨になったため 2026-11 に削除した（6.3、#5） |
 | Collabora を EC2 で稼働 | ECS Service を EC2 起動タイプで作成し、Fargate の Nextcloud から接続 |
 | Collabora クラウドサービス | Nextcloud Office アプリから外部 Collabora サーバーを指定 |

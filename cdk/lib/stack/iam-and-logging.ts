@@ -25,7 +25,6 @@ export interface TaskRolesResources {
   readonly taskRole: iam.Role;
   readonly executionRole: iam.Role;
   readonly adminSecret: secretsmanager.Secret;
-  readonly onlyofficeSecret: secretsmanager.Secret;
 }
 
 /**
@@ -97,13 +96,9 @@ export function buildTaskRoles(scope: Construct, props: TaskRolesProps): TaskRol
     generateSecretString: { excludePunctuation: false, passwordLength: 24 },
   });
   adminSecret.grantRead(executionRole);
-  const onlyofficeSecret = new secretsmanager.Secret(scope, 'OnlyofficeSecret', {
-    generateSecretString: { excludePunctuation: true, passwordLength: 32 },
-  });
-  onlyofficeSecret.grantRead(executionRole);
   props.featureSecrets.imaginarySecret?.grantRead(executionRole);
 
-  return { taskRole, executionRole, adminSecret, onlyofficeSecret };
+  return { taskRole, executionRole, adminSecret };
 }
 
 /**

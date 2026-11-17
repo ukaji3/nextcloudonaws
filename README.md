@@ -8,7 +8,7 @@ Nextcloud を AWS ECS Fargate 上にデプロイするためのプロジェク�
 ```
 クライアント → Route 53 → ALB (TLS/ACM)
                               │
-                              ├─► ECS Fargate: Apache / Nextcloud / Notify-push / OnlyOffice
+                              ├─► ECS Fargate: Apache / Nextcloud / Notify-push / Imaginary / Talk
                               │
                               ├──► Aurora Serverless v2 (PostgreSQL)
                               ├──► ElastiCache Serverless (Valkey)
@@ -40,12 +40,13 @@ docs/                    デプロイメントガイド
 |---|---|
 | `containers/nextcloud/Dockerfile` | `app/` 依存除去、COPY パス変更、AIO_TOKEN/AIO_URL 削除、aws-cli 追加（アップグレード SFN の config.php バックアップ用）、util-linux-misc 追加（ECS Exec のセッション記録に必要な `script`）、PHP 追加設定 `zz-aws-hardening.ini` と php-fpm 追加設定 `zzz-custom.conf` の COPY、upstream が書く `redis-session.ini`（Redis セッションハンドラ）をビルド時に削除、`AIO_LOG_LEVEL` デフォルト定義、`clear_env = no` |
 | `containers/nextcloud/config/redis.config.php` | ElastiCache Serverless 用に全面書き換え（`REDIS_TLS_ENABLED` による TLS 接続、クラスタモード設定） |
-| `containers/nextcloud/entrypoint.sh` | rsync に `--inplace` 付与（EFS 対応）、custom_apps 入れ子ディレクトリの自己修復（`aws_repair_custom_apps_and_upgrade` を3箇所で実行）、OpenSearch 互換パッチ（ProductCheckTrait / EndpointTrait 呼び出し無効化 / highlight `max_analyzer_offset`）、`fulltextsearch_elasticsearch:configure` の出力抑止（資格情報をログに出さない）、末尾に AWS 固有ブロック（旧版が置いた独自ファイルの除去・redis.config.php 保全） |
+| `containers/nextcloud/entrypoint.sh` | rsync に `--inplace` 付与（EFS 対応）、custom_apps 入れ子ディレクトリの自己修復（`aws_repair_custom_apps_and_upgrade` を3箇所で実行）、OpenSearch 互換パッチ（ProductCheckTrait / EndpointTrait 呼び出し無効化 / highlight `max_analyzer_offset`）、`fulltextsearch_elasticsearch:configure` の出力抑止（資格情報をログに出さない）、末尾に AWS 固有ブロック（旧版が置いた独自ファイルの除去・redis.config.php 保全・`ONLYOFFICE_ENABLED` が `yes` 以外のときの onlyoffice アプリと設定の削除） |
 | `containers/nextcloud/aws-custom-apps-repair.sh` | 独自追加。EFS 上でアプリ更新後に生じる入れ子ディレクトリの修復ライブラリ（テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/aws-healthcheck.sh` | 独自追加。ECS 用ヘルスチェック（php-fpm の待受で正常、インストール・アップグレード中は保護。テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/aws-trusted-proxies.sh` | 独自追加。NAT Gateway の EIP（`AWS_TRUSTED_PROXIES`）を `trusted_proxies` 20〜29 番に設定（notify_push 用。テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/aws-talk-servers.sh` | 独自追加。以前の版が登録した誤った TURN/STUN（`<domain>:3478`）を、正しい `turn.<domain>:3478` の登録後に削除（テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/aws-legacy-files.sh` | 独自追加。旧版が Web ルートに置いた独自ファイル（`diag.php`）を起動時に除去（テスト: `containers/nextcloud/tests/`） |
+| `containers/nextcloud/aws-onlyoffice-removal.sh` | 独自追加。`ONLYOFFICE_ENABLED` が `yes` 以外なら、旧版が入れた onlyoffice アプリ（`occ app:remove`、EFS 上の残骸は再試行して削除）、その app config、config.php の `onlyoffice` を起動時に削除。残っているものだけを消すので 2 回目以降は何もしない。`oc_onlyoffice_*` テーブルは残す（テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/php/zz-aws-hardening.ini` | 独自追加。PHP の追加設定（conf.d の最後に読まれる）。`session.upload_progress.enabled = 0`（Nextcloud は未使用、CVE-2026-109619 のアドバイザリが無効化を推奨。テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/php-fpm.d/zzz-custom.conf` | 独自追加。php-fpm のプール設定（php-fpm.d の最後に読まれる）。`clear_env = no`、10 秒を超えたリクエストの slowlog、`request_terminate_timeout = 60`。以前は entrypoint.sh が起動のたびに書いていたが、設定ディレクトリが root 所有になったためイメージに含めた（テスト: `containers/nextcloud/tests/`） |
 
@@ -78,7 +79,6 @@ npx cdk deploy
 | `domain` | Nextcloud のドメイン名 |
 | `hostedZoneId` / `hostedZoneName` | Route 53 ホストゾーン（指定時は証明書・DNS 自動設定。2つ対で指定） |
 | `certificateArn` | 既存 ACM 証明書の ARN（ホストゾーン未指定時に使用）。ホストゾーンか証明書のどちらかが必須で、無い場合は synth がエラーになる（平文 HTTP では起動しない） |
-| `enableOnlyOffice` | OnlyOffice の有効化 |
 | `enableFulltextsearch` | OpenSearch Service + 全文検索の有効化 |
 | `auroraMinAcu` / `auroraMaxAcu` | Aurora Serverless v2 の ACU 範囲 |
 | `alarmEmails` | アラーム通知先メール（カンマ区切り）。空なら購読なし |
@@ -88,6 +88,8 @@ npx cdk deploy
 | `wafAllowedCountries` | ALB に到達できる国（ISO 3166 alpha-2、カンマ区切り、既定 `JP`）。`none` で国による許可をなくし、許可 CIDR だけを通す（CIDR も空ならエラー） |
 | `wafAllowedIpv4Cidrs` / `wafAllowedIpv6Cidrs` | 国に依らず許可する CIDR（カンマ区切り、既定は空）。許可国以外から使う拠点の固定 IP を登録する |
 | `aioImageTag` / `aioNotifyPushImageTag` | AIO 周辺イメージのタグ（notify-push は省略時 `aioImageTag` と同じ） |
+
+`enableOnlyOffice` は 2026-11 に廃止した。OnlyOffice（Document Server と Nextcloud の onlyoffice アプリ）を削除し、Office ファイルのブラウザ上での編集機能は提供しない（#5）。cdk.json に残っていると synth が警告を出し、値は無視する。
 
 詳細は [docs/aws-deployment.md](docs/aws-deployment.md) を参照。
 

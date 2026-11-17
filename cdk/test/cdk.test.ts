@@ -1,5 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
-import { Match, Template } from 'aws-cdk-lib/assertions';
+import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
@@ -26,7 +26,6 @@ const testContext: Record<string, string> = {
   hostedZoneId: 'Z0123456789ABCDEFGHIJ',
   hostedZoneName: 'example.com',
   nextcloudImageUri: '111122223333.dkr.ecr.us-east-1.amazonaws.com/aio-nextcloud:test',
-  enableOnlyOffice: 'true',
   enableTalk: 'true',
   enableFulltextsearch: 'true',
   enableImaginary: 'true',
@@ -190,7 +189,67 @@ describe('NextcloudAioStack', () => {
     );
 
     test('SFN 管理外のサービスは DesiredCount を持つ', () => {
-      expect(byName('onlyofficeService')?.DesiredCount).toBe(1);
+      expect(byName('imaginaryService')?.DesiredCount).toBe(1);
+    });
+  });
+
+  describe('OnlyOffice removed (2026-11)', () => {
+    /**
+     * Synthesize the stack with context overrides and return the stack too.
+     *
+     * @param overrides - Context values replacing the test defaults.
+     * @returns The stack and its template.
+     */
+    function synthStack(overrides: Record<string, string>): { stack: cdk.Stack; template: Template } {
+      const app = new cdk.App({ context: { ...testContext, ...overrides } });
+      const stack = new NextcloudAioStack(app, 'StaleContextStack', { env: { account: '111122223333', region: 'us-east-1' } });
+      return { stack, template: Template.fromStack(stack) };
+    }
+
+    /**
+     * Container definitions of every task definition, by container name.
+     *
+     * @param t - Template to inspect.
+     * @returns Containers keyed by name.
+     */
+    function containersByName(t: Template): Record<string, { Image: unknown; Environment?: { Name: string; Value: unknown }[]; Secrets?: { Name: string }[] }> {
+      const result: Record<string, { Image: unknown; Environment?: { Name: string; Value: unknown }[]; Secrets?: { Name: string }[] }> = {};
+      for (const td of Object.values(t.findResources('AWS::ECS::TaskDefinition'))) {
+        for (const c of (td as { Properties: { ContainerDefinitions: { Name: string; Image: unknown }[] } }).Properties.ContainerDefinitions) {
+          result[c.Name] = c;
+        }
+      }
+      return result;
+    }
+
+    test('OnlyOffice のサービス・タスク定義・EFS アクセスポイント・シークレットを作らない', () => {
+      const ids = Object.keys(template.toJSON().Resources as Record<string, unknown>);
+      expect(ids.filter((id) => /onlyoffice/i.test(id))).toEqual([]);
+      expect(JSON.stringify(template.toJSON())).not.toContain('aio-onlyoffice');
+      expect(JSON.stringify(template.findResources('AWS::EFS::AccessPoint'))).not.toContain('/onlyoffice-data');
+    });
+
+    test('Nextcloud に ONLYOFFICE_ENABLED=no を渡し、OnlyOffice の設定とシークレットは渡さない', () => {
+      const nextcloud = containersByName(template).nextcloud;
+      const env = Object.fromEntries((nextcloud.Environment ?? []).map((e) => [e.Name, e.Value]));
+      expect(env.ONLYOFFICE_ENABLED).toBe('no');
+      expect(env).not.toHaveProperty('ONLYOFFICE_HOST');
+      expect((nextcloud.Secrets ?? []).map((s) => s.Name)).not.toContain('ONLYOFFICE_SECRET');
+    });
+
+    test('apache の ONLYOFFICE_HOST は無効を表す localhost', () => {
+      const env = Object.fromEntries((containersByName(template).apache.Environment ?? []).map((e) => [e.Name, e.Value]));
+      expect(env.ONLYOFFICE_HOST).toBe('localhost');
+    });
+
+    test.each(['true', 'false'])('古い cdk.json の enableOnlyOffice=%s は無視し、警告を出す', (value) => {
+      const { stack, template: t } = synthStack({ enableOnlyOffice: value });
+      expect(Object.keys(t.toJSON().Resources as Record<string, unknown>).filter((id) => /onlyoffice/i.test(id))).toEqual([]);
+      Annotations.fromStack(stack).hasWarning('*', Match.stringLikeRegexp('Context "enableOnlyOffice" is no longer used'));
+    });
+
+    test('対照: enableOnlyOffice が無ければ警告を出さない', () => {
+      Annotations.fromStack(synthStack({}).stack).hasNoWarning('*', Match.stringLikeRegexp('enableOnlyOffice'));
     });
   });
 
@@ -497,7 +556,6 @@ describe('NextcloudAioStack', () => {
         apache: false,
         Talk: true,
         notifypush: false,
-        onlyoffice: false,
         imaginary: false,
       });
     });
@@ -513,7 +571,6 @@ describe('NextcloudAioStack', () => {
         apache: disabled,
         Talk: undefined,
         notifypush: disabled,
-        onlyoffice: disabled,
         imaginary: disabled,
       });
     });
@@ -575,7 +632,8 @@ describe('NextcloudAioStack', () => {
     });
 
     test('ECS 設計: 全サービスと SFN の一時タスクが Public Subnet 外・公開 IP なし', () => {
-      expect(Object.keys(template.findResources('AWS::ECS::Service')).length).toBeGreaterThanOrEqual(6);
+      // nextcloud / apache / notify-push / imaginary / talk (OnlyOffice was removed in 2026-11)
+      expect(Object.keys(template.findResources('AWS::ECS::Service')).length).toBeGreaterThanOrEqual(5);
       expect(Object.keys(template.findResources('AWS::StepFunctions::StateMachine')).length).toBe(1);
       expect(ecsPublicPlacementViolations(resources)).toEqual([]);
     });

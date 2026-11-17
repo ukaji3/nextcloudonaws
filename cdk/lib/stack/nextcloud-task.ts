@@ -27,7 +27,6 @@ export interface NextcloudTaskProps {
   readonly dbSecret: secretsmanager.ISecret;
   readonly cache: elasticache.CfnServerlessCache;
   readonly adminSecret: secretsmanager.ISecret;
-  readonly onlyofficeSecret: secretsmanager.ISecret;
   readonly featureSecrets: FeatureSecrets;
   readonly osDomain?: opensearch.IDomain;
   /** Extra trusted proxies (NAT Gateway public IPs), see aws-trusted-proxies.sh. */
@@ -111,14 +110,17 @@ function yesNo(enabled: boolean): string {
  * {@link NextcloudTaskProps.turnDomain}). It used to be the Nextcloud domain,
  * i.e. the ALB, which has no 3478 listener.
  *
+ * The stack runs no office suite. ONLYOFFICE_ENABLED is passed as "no" on
+ * purpose: entrypoint.sh (aws-onlyoffice-removal.sh) removes the onlyoffice app
+ * and its settings left by earlier versions unless the value is "yes".
+ *
  * @param config - Deployment parameters.
  * @param turnDomain - TURN/STUN host.
  * @returns Environment entries.
  */
 function integrationEnvironment(config: StackConfig, turnDomain: string): Environment {
   return {
-    ONLYOFFICE_ENABLED: yesNo(config.enableOnlyOffice),
-    ONLYOFFICE_HOST: 'nextcloud-aio-onlyoffice.nextcloud.local',
+    ONLYOFFICE_ENABLED: 'no',
     TALK_ENABLED: yesNo(config.enableTalk),
     TALK_HOST: 'nextcloud-aio-talk.nextcloud.local',
     TALK_PORT: '3478',
@@ -203,7 +205,6 @@ function nextcloudSecrets(props: NextcloudTaskProps): Record<string, ecs.Secret>
     ...(s.talkSecret ? { TURN_SECRET: ecs.Secret.fromSecretsManager(s.talkSecret) } : {}),
     ...(s.signalingSecret ? { SIGNALING_SECRET: ecs.Secret.fromSecretsManager(s.signalingSecret) } : {}),
     ...(s.imaginarySecret ? { IMAGINARY_SECRET: ecs.Secret.fromSecretsManager(s.imaginarySecret) } : {}),
-    ONLYOFFICE_SECRET: ecs.Secret.fromSecretsManager(props.onlyofficeSecret),
   };
 }
 
