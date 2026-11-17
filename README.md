@@ -48,7 +48,16 @@ docs/                    デプロイメントガイド
 | `containers/nextcloud/aws-legacy-files.sh` | 独自追加。旧版が Web ルートに置いた独自ファイル（`diag.php`）を起動時に除去（テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/php/zz-aws-hardening.ini` | 独自追加。PHP の追加設定（conf.d の最後に読まれる）。`session.upload_progress.enabled = 0`（Nextcloud は未使用、CVE-2026-109619 のアドバイザリが無効化を推奨。テスト: `containers/nextcloud/tests/`） |
 
-同期状況: Nextcloud 34.0.4 / PHP 8.4.27 / dinit。upstream AIO main `da7cf9d7`（2026-10-08）に同期済みで、上表以外のファイル（start.sh・notify*.sh・dinit.d/・config/ の大半など）は upstream と同一。PHP は CVE-2026-109618 / CVE-2026-109619 の修正版 8.4.27 に上げている（upstream の PHP 更新コミット `5979d230` 相当のみ取り込み、Nextcloud 35 系への更新は未取り込み）。以前の redis-patch.php（Redis.php の全置換）は、Nextcloud 33.0.7 以降の公式実装が SCAN + UNLINK に変わったため撤去した。
+同期状況: Nextcloud 34.0.4 / PHP 8.4.27 / dinit。upstream AIO main `da7cf9d7`（2026-10-08）に同期済みで、上表以外のファイル（start.sh・notify*.sh・dinit.d/・config/ の大半など）は upstream と同一。それ以降の upstream の変更は、Nextcloud 35 系への更新を除き、次だけを取り込んでいる。
+
+| upstream | 内容 |
+|---|---|
+| `5979d230` | PHP 8.4.27（CVE-2026-109618 / CVE-2026-109619 の修正版） |
+| `13404533`（`119d00c5` を含む） | PECL 拡張を pecl.php.net ではなく GitHub のリリースソースからビルドする。版は `ARG` で固定（smbclient は 1.1.2） |
+| `7f583c35` | Nextcloud のリリース署名鍵を keyserver ではなく nextcloud.com から取得し、署名の検証で主鍵の指紋を照合する |
+| `ecc86b41` | `imagemagick-heic` / `imagemagick-tiff` を削除（既定のプレビュー設定は HEIC / TIFF を Imagick で扱わない。Imaginary 有効時は Imaginary が扱う） |
+
+未取り込みの upstream 変更: Nextcloud 35 系への更新と、35 を前提にした `de49b907`（`app_install_overwrite` の削除をやめる）、`63c58393`（`allow_local_remote_servers` の削除。35 への移行時に取り込む）、`c29ed417` / `be40b189`（`UPDATE_NEXTCLOUD_APPS` の曜日指定。このスタックは `no`）、`37588ed3`（ClamAV の `av_stream_max_length`。このスタックは ClamAV 無効）。以前の redis-patch.php（Redis.php の全置換）は、Nextcloud 33.0.7 以降の公式実装が SCAN + UNLINK に変わったため撤去した。
 
 ## デプロイ
 

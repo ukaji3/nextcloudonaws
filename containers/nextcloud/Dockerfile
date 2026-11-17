@@ -1,6 +1,14 @@
 # syntax=docker/dockerfile:latest
 FROM php:8.4.27-fpm-alpine3.24
 
+ARG IGBINARY_VERSION=3.2.16
+ARG APCU_VERSION=5.1.28
+ARG MEMCACHED_VERSION=3.4.0
+ARG REDIS_VERSION=6.3.0
+ARG IMAGICK_VERSION=3.8.1
+ARG IMAP_VERSION=1.0.3
+ARG SMBCLIENT_VERSION=1.1.2
+
 ENV PHP_MEMORY_LIMIT=512M
 ENV PHP_UPLOAD_LIMIT=1G
 ENV PHP_MAX_TIME=3600
@@ -48,8 +56,6 @@ RUN set -ex; \
         icu-dev \
         imagemagick-dev \
         imagemagick-svg \
-        imagemagick-heic \
-        imagemagick-tiff \
         libevent-dev \
         libjpeg-turbo-dev \
         libmcrypt-dev \
@@ -58,9 +64,11 @@ RUN set -ex; \
         libwebp-dev \
         libxml2-dev \
         libzip-dev \
+        lz4-dev \
         openldap-dev \
         pcre-dev \
         postgresql-dev \
+        zstd-dev \
     ; \
     \
     docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp; \
@@ -80,21 +88,41 @@ RUN set -ex; \
         zip \
     ; \
     \
-# pecl will claim success even if one install fails, so we need to perform each install separately
-    pecl install -o igbinary-3.2.16; \
-    pecl install APCu-5.1.28; \
-    pecl install -D 'enable-memcached-igbinary="yes"' memcached-3.4.0; \
-    pecl install -oD 'enable-redis-igbinary="yes" enable-redis-zstd="yes" enable-redis-lz4="yes"' redis-6.3.0; \
-   pecl install -o imagick-3.8.1; \
+# build PECL extensions from their GitHub release sources as pecl.php.net is not reliably reachable from CI
+    mkdir -p \
+        /usr/src/php/ext/igbinary \
+        /usr/src/php/ext/apcu \
+        /usr/src/php/ext/memcached \
+        /usr/src/php/ext/redis \
+        /usr/src/php/ext/imagick \
+    ; \
+    curl -fsSL --retry 5 "https://github.com/igbinary/igbinary/archive/refs/tags/$IGBINARY_VERSION.tar.gz" \
+        | tar -xz --strip-components=1 -C /usr/src/php/ext/igbinary; \
+    curl -fsSL --retry 5 "https://github.com/krakjoe/apcu/archive/refs/tags/v$APCU_VERSION.tar.gz" \
+        | tar -xz --strip-components=1 -C /usr/src/php/ext/apcu; \
+    curl -fsSL --retry 5 "https://github.com/php-memcached-dev/php-memcached/archive/refs/tags/v$MEMCACHED_VERSION.tar.gz" \
+        | tar -xz --strip-components=1 -C /usr/src/php/ext/memcached; \
+    curl -fsSL --retry 5 "https://github.com/phpredis/phpredis/archive/refs/tags/$REDIS_VERSION.tar.gz" \
+        | tar -xz --strip-components=1 -C /usr/src/php/ext/redis; \
+    curl -fsSL --retry 5 "https://github.com/Imagick/imagick/archive/refs/tags/$IMAGICK_VERSION.tar.gz" \
+        | tar -xz --strip-components=1 -C /usr/src/php/ext/imagick; \
+# the imagick version placeholder is only replaced when packaging for PECL
+    grep -q '@PACKAGE_VERSION@' /usr/src/php/ext/imagick/php_imagick.h; \
+    sed -i "s/@PACKAGE_VERSION@/$IMAGICK_VERSION/" /usr/src/php/ext/imagick/php_imagick.h; \
     \
-    docker-php-ext-enable \
+# igbinary needs to be installed first as memcached and redis are built against it
+    docker-php-ext-install -j "$(nproc)" \
         igbinary \
         apcu \
+    ; \
+    docker-php-ext-configure memcached --enable-memcached-igbinary; \
+    docker-php-ext-configure redis --enable-redis-igbinary --enable-redis-zstd --enable-redis-lz4 --with-liblz4; \
+    docker-php-ext-install -j "$(nproc)" \
         memcached \
         redis \
         imagick \
     ; \
-    rm -r /tmp/pear; \
+    docker-php-source delete; \
     \
     runDeps="$( \
         scanelf --needed --nobanner --format '%n#p' --recursive /usr/local/lib/php/extensions \
@@ -169,8 +197,9 @@ RUN set -ex; \
         "https://download.nextcloud.com/server/releases/nextcloud-${NEXTCLOUD_VERSION}.tar.bz2.asc"; \
     export GNUPGHOME="$(mktemp -d)"; \
 # gpg key from https://nextcloud.com/nextcloud.asc
-    gpg --batch --keyserver keyserver.ubuntu.com  --recv-keys 28806A878AE423A28372792ED75899B9A724937A; \
-    gpg --batch --verify nextcloud.tar.bz2.asc nextcloud.tar.bz2; \
+    curl -fsSL https://nextcloud.com/nextcloud.asc | gpg --batch --import; \
+    gpg --batch --status-fd 1 --verify nextcloud.tar.bz2.asc nextcloud.tar.bz2 \
+        | grep -q '^\[GNUPG:\] VALIDSIG .* 28806A878AE423A28372792ED75899B9A724937A$'; \
     tar -xjf nextcloud.tar.bz2 -C /usr/src/; \
     gpgconf --kill all; \
     rm nextcloud.tar.bz2.asc nextcloud.tar.bz2; \
@@ -206,10 +235,21 @@ RUN set -ex; \
         pgsql \
         ftp \
     ; \
-# imap was removed from PHP core in 8.4, so it needs to be installed from PECL from now on
-    pecl install -D 'with-kerberos="yes" with-imap-ssl="yes"' imap-1.0.3; \
-    pecl install smbclient; \
-    docker-php-ext-enable imap smbclient; \
+# imap was removed from PHP core in 8.4, so it needs to be installed from its PECL sources from now on
+    mkdir -p \
+        /usr/src/php/ext/imap \
+        /usr/src/php/ext/smbclient \
+    ; \
+    curl -fsSL --retry 5 "https://github.com/php/pecl-mail-imap/archive/refs/tags/$IMAP_VERSION.tar.gz" \
+        | tar -xz --strip-components=1 -C /usr/src/php/ext/imap; \
+    curl -fsSL --retry 5 "https://github.com/eduardok/libsmbclient-php/archive/refs/tags/$SMBCLIENT_VERSION.tar.gz" \
+        | tar -xz --strip-components=1 -C /usr/src/php/ext/smbclient; \
+    docker-php-ext-configure imap --with-kerberos --with-imap-ssl; \
+    docker-php-ext-install -j "$(nproc)" \
+        imap \
+        smbclient \
+    ; \
+    docker-php-source delete; \
     \
     runDeps="$( \
         scanelf --needed --nobanner --format '%n#p' --recursive /usr/local/lib/php/extensions \
@@ -235,8 +275,6 @@ RUN set -ex; \
         bind-tools \
         imagemagick \
         imagemagick-svg \
-        imagemagick-heic \
-        imagemagick-tiff \
 # nextcloudonaws: util-linux-misc provides /usr/bin/script, which the ECS Exec
 # agent needs to record sessions in the Exec audit log group (without it the
 # session works but nothing is logged).
