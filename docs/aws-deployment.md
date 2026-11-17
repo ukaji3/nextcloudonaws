@@ -796,15 +796,15 @@ HTTPS:                 強制
 | `containers/nextcloud/entrypoint.sh` | 修正 | 下記の変更を含む |
 | `containers/nextcloud/aws-custom-apps-repair.sh` | 追加 | custom_apps 入れ子ディレクトリの修復ライブラリ（10.2 参照） |
 | `containers/nextcloud/tests/test-aws-custom-apps-repair.sh` | 追加 | 上記ライブラリのテスト（`bash containers/nextcloud/tests/test-aws-custom-apps-repair.sh`） |
-| `containers/nextcloud/Dockerfile` | 修正 | aws-cli 追加、util-linux-misc 追加（ECS Exec のセッション記録用 `script`）、PHP 追加設定の COPY、`clear_env = no`（upstream AIO main に同期済み。PHP 8.4 / dinit / su-exec） |
+| `containers/nextcloud/Dockerfile` | 修正 | aws-cli 追加、util-linux-misc 追加（ECS Exec のセッション記録用 `script`）、PHP 追加設定と php-fpm 追加設定の COPY、upstream が書く `redis-session.ini` をビルド時に削除（ElastiCache Serverless のクラスタモードと非互換な `session.save_handler=redis` を除去し、PHP 既定のファイルセッションにする。以前は entrypoint.sh が起動時に削除していた）、`clear_env = no`（upstream AIO との同期状況は README の「upstream からの変更点」を参照。PHP 8.4 / dinit / su-exec） |
 | `containers/nextcloud/php/zz-aws-hardening.ini` | 追加 | PHP の追加設定（`/usr/local/etc/php/conf.d/` の最後に読まれる）。`session.upload_progress.enabled = 0`: スクリプト実行前に POST の内容だけで動く機能で、Nextcloud は使っていない（アップロードは WebDAV の PUT）。CVE-2026-109619 のアドバイザリが、修正版の適用後も未使用なら無効化を推奨（テスト: `tests/test-aws-php-ini.sh`） |
+| `containers/nextcloud/php-fpm.d/zzz-custom.conf` | 追加 | php-fpm のプール設定（`/usr/local/etc/php-fpm.d/` の最後に読まれる）。`clear_env = no`（ECS の環境変数を config/*.php の `getenv()` へ渡す）、`request_slowlog_timeout = 10` と `slowlog = /proc/self/fd/2`（10 秒を超えたリクエストのバックトレースを CloudWatch Logs へ）、`request_terminate_timeout = 60`。以前は entrypoint.sh が起動のたびに書いていた。PHP の設定ディレクトリは root 所有・他者書き込み不可（upstream `0bf4473c`）で、www-data で動く entrypoint.sh からは書けないため、イメージに含めた（テスト: `tests/test-aws-php-fpm.sh`） |
 | `containers/nextcloud/aws-healthcheck.sh` | 追加 | ECS 用ヘルスチェック（15 章参照、テスト: `tests/test-aws-healthcheck.sh`） |
 
 ### 10.1 entrypoint.sh の変更内容
 
 | 変更 | 理由 |
 |---|---|
-| `redis-session.ini` の削除 | ElastiCache Serverless (TLS/クラスタモード) と非互換な `session.save_handler=redis` 設定を除去。セッションはファイルベースに変更 |
 | `redis.config.php` の保持 | 環境変数から Redis 設定を自動構成するファイル。誤削除を防止 |
 | custom_apps 入れ子修復（3箇所） | 10.2 参照。Imaginary ブロック後・全文検索アプリ更新後・スクリプト末尾で実行し、修復した場合は `occ upgrade` も実行 |
 | `fulltextsearch_elasticsearch:configure` の出力抑止 | 出力に `elastic_host`（OpenSearch の admin パスワードを含む）が出るため、CloudWatch Logs には成否のみ出力 |
@@ -907,8 +907,8 @@ npm install
     "certificateArn": "",
     "hostedZoneId": "Z1234567890ABC",
     "hostedZoneName": "example.com",
-    "aioImageTag": "20260929_105435",
-    "nextcloudImageUri": "<ACCOUNT_ID>.dkr.ecr.ap-northeast-1.amazonaws.com/aio-nextcloud:nc34.0.4-<timestamp>",
+    "aioImageTag": "20261029_171813",
+    "nextcloudImageUri": "<ACCOUNT_ID>.dkr.ecr.ap-northeast-1.amazonaws.com/aio-nextcloud:nc34.0.6-<timestamp>",
     "apachePort": 11000,
     "enableOnlyOffice": "true",
     "enableTalk": "true",

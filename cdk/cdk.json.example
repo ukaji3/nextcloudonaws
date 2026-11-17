@@ -9,7 +9,7 @@
     "certificateArn": "",
     "hostedZoneId": "",
     "hostedZoneName": "",
-    "aioImageTag": "20260929_105435",
+    "aioImageTag": "20261029_171813",
     "nextcloudImageUri": "",
     "apachePort": 11000,
     "enableOnlyOffice": "true",
