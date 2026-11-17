@@ -18,7 +18,7 @@ ENV REDIS_DB_INDEX=0
 ENV AIO_LOG_LEVEL=error
 
 # AIO settings start # Do not remove or change this line!
-ENV NEXTCLOUD_VERSION=34.0.4
+ENV NEXTCLOUD_VERSION=34.0.6
 # AIO settings end # Do not remove or change this line!
 
 COPY --chmod=775 containers/nextcloud/*.sh /

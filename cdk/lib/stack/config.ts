@@ -152,7 +152,8 @@ function wafCountries(scope: Construct): readonly string[] {
  * @returns Typed configuration.
  */
 export function loadStackConfig(scope: Construct): StackConfig {
-  const aioImageTag = contextString(scope, 'aioImageTag', '20260218_123804');
+  // AIO v14.4.3: the last AIO release for Nextcloud 34 (aio-nextcloud of this tag is 34.0.5).
+  const aioImageTag = contextString(scope, 'aioImageTag', '20261029_171813');
   return {
     domain: contextString(scope, 'domain', 'cloud.example.com'),
     certificateArn: contextString(scope, 'certificateArn', ''),

@@ -49,7 +49,7 @@ docs/                    デプロイメントガイド
 | `containers/nextcloud/php/zz-aws-hardening.ini` | 独自追加。PHP の追加設定（conf.d の最後に読まれる）。`session.upload_progress.enabled = 0`（Nextcloud は未使用、CVE-2026-109619 のアドバイザリが無効化を推奨。テスト: `containers/nextcloud/tests/`） |
 | `containers/nextcloud/php-fpm.d/zzz-custom.conf` | 独自追加。php-fpm のプール設定（php-fpm.d の最後に読まれる）。`clear_env = no`、10 秒を超えたリクエストの slowlog、`request_terminate_timeout = 60`。以前は entrypoint.sh が起動のたびに書いていたが、設定ディレクトリが root 所有になったためイメージに含めた（テスト: `containers/nextcloud/tests/`） |
 
-同期状況: Nextcloud 34.0.4 / PHP 8.4.27 / dinit。upstream AIO main `da7cf9d7`（2026-10-08）に同期済みで、上表以外のファイル（start.sh・notify*.sh・dinit.d/・config/ の大半など）は upstream と同一。それ以降の upstream の変更は、Nextcloud 35 系への更新を除き、次だけを取り込んでいる。
+同期状況: Nextcloud 34.0.6 / PHP 8.4.27 / dinit。upstream AIO main `da7cf9d7`（2026-10-08）に同期済みで、上表以外のファイル（start.sh・notify*.sh・dinit.d/・config/ の大半など）は upstream と同一。Nextcloud の版はこのリポジトリで決めている（upstream AIO は 34 系を 34.0.5 で終え、main は 35 系）。周辺イメージ（`aioImageTag`）は 34 系向け最後の AIO v14.4.3（`20261029_171813`）。それ以降の upstream の変更は、Nextcloud 35 系への更新を除き、次だけを取り込んでいる。
 
 | upstream | 内容 |
 |---|---|
